@@ -91,7 +91,7 @@ KINDLE_DASHBOARD_CONFIG=/path/to/config.json python dashboard.py --no-upload
 3. 将配置文件权限设为 `0600`。
 4. 更新失败时保留远端上一张成功图片。
 
-Kindle 越狱后可定时下载 WebDAV 文件或其只读分享链接，再使用 `eips` 刷新屏幕。不要将含私人日程的分享链接写进公开仓库。
+Kindle 设备端源码与部署说明见 [`kindle/`](kindle/README.md)。根目录的 `dashboard.py` 负责生成和上传图片；设备端负责下载、FBInk 显示、半小时调度及休眠恢复，两侧配置独立。不要将含私人日程的分享链接写进公开仓库。
 
 ## 测试
 

@@ -1,0 +1,24 @@
+# Private deployment data; the example stays visible.
+config*.conf
+!config.example.conf
+wifi-ssid.conf
+*.local.*
+.env*
+
+# Images, logs, captures and same-filesystem worker temporary files.
+*.png
+*.log
+*.err
+*.tmp
+*.lock
+.calendar-*/
+.calendar-auto-refresh.*/
+.dedicated-log.*
+*.bak
+*.backup
+*~
+*.orig
+*.rej
+backups/
+cache/
+runtime/

@@ -222,3 +222,7 @@ git diff --check
 ## 许可证
 
 MIT，见 `LICENSE`。
+
+## 安全与隐私
+
+请遵守 [SECURITY.md](SECURITY.md)。提交前执行 `python3 scripts/check_privacy.py --staged`；CI 自动检查完整 Git 历史。规则只能辅助发现风险，发布前仍需人工审阅个人信息和凭据。

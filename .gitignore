@@ -17,3 +17,13 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+
+# Deployment artifacts and private exports
+*.ics
+*.log
+*.pem
+*.key
+*.p12
+*.bak
+*.backup
+backups/

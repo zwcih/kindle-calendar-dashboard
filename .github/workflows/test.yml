@@ -20,4 +20,4 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: pip install -r requirements.txt
       - run: python -m unittest -v
-      - run: python -m py_compile dashboard.py test_dashboard.py
+      - run: python -m py_compile dashboard.py test_dashboard.py update_no_model.py test_update_no_model.py

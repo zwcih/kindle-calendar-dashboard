@@ -9,20 +9,24 @@
 - 短标题单行放大，长标题优先使用两行大字
 - 紧凑的日期、天气、温度和降雨概率头部
 - 支持全天事件、重复事件展开、取消事件和时区转换
-- WebDAV 原子覆盖；远端内容未变化时跳过上传
+- 本地 PNG 原子替换；WebDAV 远端内容未变化时跳过上传
+- 独立的无模型更新器：严格校验今天/明天天气，原子更新缓存，失败时降级
 - 配置、账号、端点、坐标和生成图片均与源码分离
 
 ## 数据流
 
 ```text
-CalDAV calendar → dashboard.py → local grayscale PNG → optional WebDAV upload → Kindle
-                         ↑
-                  Open-Meteo forecast
+update_no_model.py (standalone, no model/agent runtime)
+  ├─ Open-Meteo → validate two local dates/numbers → atomic weather cache
+  │                 failure → valid same-date cache or no weather
+  └─ dashboard.py functions: CalDAV → local grayscale PNG → optional WebDAV PUT → Kindle
 ```
+
+更新器只依赖 Python 标准库和已有 `dashboard.py`（使用 Pillow），不需要 OpenClaw、模型 API、聊天会话或模型凭据。
 
 ## 安装
 
-需要 Python 3.11+、Pillow 和支持中文的 Noto Sans CJK 字体。
+需要 Python 3.11+、Pillow、IANA 时区数据库和支持中文的 Noto Sans CJK 字体。
 
 ```bash
 git clone https://github.com/zwcih/kindle-calendar-dashboard.git
@@ -33,46 +37,35 @@ pip install -r requirements.txt
 cp config.example.json config.local.json
 ```
 
-编辑 `config.local.json`：
+编辑 `config.local.json`，替换示例值：
 
-- `nextcloud.caldav_url`：CalDAV 日历集合 URL
-- `nextcloud.webdav_url`：可选的 PNG 上传 URL
+- `nextcloud.caldav_url`：CalDAV 日历集合 HTTPS URL
+- `nextcloud.webdav_url`：PNG 上传 HTTPS URL；使用 `--no-upload` 时可省略
 - `nextcloud.username`：Nextcloud 用户名
-- `nextcloud.password_env`：保存应用密码的环境变量名
+- `nextcloud.password_env`：保存应用密码的环境变量名，不是密码本身
 - `weather.latitude` / `weather.longitude`：天气位置
 - `weather.timezone`：IANA 时区，例如 `Asia/Shanghai`
 - `display`：目标屏幕尺寸
 - `fonts`：本机中文字体路径
 
-`config.local.json` 已被 `.gitignore` 排除，不会提交；字段规范见 `config.schema.json`。程序拒绝 HTTP 认证端点、明文凭据字段、非法坐标和非法密码变量名。密码不要写进 JSON；使用 Nextcloud 应用密码并通过环境变量提供：
+`config.local.json` 已被 `.gitignore` 排除；字段规范见 `config.schema.json`。现有配置加载器拒绝未知字段、HTTP 认证端点、明文凭据字段、非法坐标和非法密码变量名，但并不执行完整 JSON Schema 校验。更新器另要求实际使用的端点有主机名且不含 URL 内嵌账号/密码、空白或片段。
+
+密码仅从 `nextcloud.password_env` 指定的环境变量读取。不会调用凭据管理 CLI，也不会自动读取 `.env`。交互式 Bash 中可隐藏输入，避免把密码字面量写入历史：
 
 ```bash
-export NEXTCLOUD_PASSWORD='your-app-password'
+read -r -s -p 'Nextcloud app password: ' NEXTCLOUD_PASSWORD; printf '\n'
+export NEXTCLOUD_PASSWORD
 ```
 
-变量名应与 `nextcloud.password_env` 一致。也可以复制 `.env.example` 作为自己的凭据清单，但脚本不会自动读取 `.env`，避免意外泄漏。
+变量名应与配置一致。`.env.example` 只是变量清单。定时任务应由调度器安全注入环境，或读取仓库外、权限为 `0600` 的专用环境文件；不要把密码放在命令行、源码或公开任务定义中。
 
-## 运行
-
-生成并上传：
+默认读取脚本目录下的 `config.local.json`。也可设置：
 
 ```bash
-python dashboard.py --output output/dashboard.png --days 1
+export KINDLE_DASHBOARD_CONFIG=/path/to/config.json
 ```
 
-跳过 WebDAV 上传（仍会通过 CalDAV 读取日历）：
-
-```bash
-python dashboard.py --no-upload --output output/dashboard.png --days 1
-```
-
-默认读取 `config.local.json`。也可指定其他配置文件：
-
-```bash
-KINDLE_DASHBOARD_CONFIG=/path/to/config.json python dashboard.py --no-upload
-```
-
-以下环境变量可以覆盖配置：
+以下环境变量覆盖配置：
 
 - `KINDLE_CALDAV_URL`
 - `KINDLE_WEBDAV_URL`
@@ -80,25 +73,136 @@ KINDLE_DASHBOARD_CONFIG=/path/to/config.json python dashboard.py --no-upload
 - `KINDLE_WEATHER_LAT` / `KINDLE_WEATHER_LON`
 - `KINDLE_TIMEZONE`
 
-可通过 `--weather-file` 使用预先缓存的 Open-Meteo JSON。天气读取失败时，日历仍会使用现有缓存继续渲染。
+注意现有加载器的边界：若 JSON 中一项坐标是数值 `0`、另一项非零，会被其配对检查误判。无需改源码，可将两项坐标都通过上述环境变量以字符串提供。更新器自身接受合法零坐标。
 
-## 自动更新
+## 推荐运行方式：无模型更新器
 
-可使用任意任务调度器定期运行脚本。建议：
-
-1. 使用只具备目标日历和目标上传目录权限的独立账号。
-2. 使用应用密码，不使用主账号密码。
-3. 将配置文件权限设为 `0600`。
-4. 更新失败时保留远端上一张成功图片。
-
-Kindle 越狱后可定时下载 WebDAV 文件或其只读分享链接，再使用 `eips` 刷新屏幕。不要将含私人日程的分享链接写进公开仓库。
-
-## 测试
+从仓库目录运行，刷新天气、读取日历、渲染并上传：
 
 ```bash
-python -m unittest -v
-python -m py_compile dashboard.py
+python update_no_model.py
 ```
+
+指定本地输出及天气缓存：
+
+```bash
+python update_no_model.py --output output/dashboard.png --weather-file output/weather.json
+```
+
+只跳过上传：
+
+```bash
+python update_no_model.py --no-upload
+```
+
+**`--no-upload` 不是离线模式**：仍会请求 Open-Meteo 天气和通过认证的 CalDAV 日历，也仍会写本地缓存和图片。即使缓存存在，每次运行仍尝试刷新天气。更新器没有离线运行开关；真正离线的是下述测试。CalDAV 读取也需要应用密码。
+
+`--output`、`--weather-file` 的相对路径相对于当前工作目录，默认分别为 `output/dashboard.png`、`output/weather.json`。更新器不改变工作目录；调度器必须设置正确工作目录或传绝对路径。输出、缓存和所选配置/入口源码路径不能相同。选择专用、非符号链接的输出路径，不要指向其他重要文件。
+
+更新器复用 `dashboard.fetch_events(..., 1, ...)`（该接口同时查询到次日）、`parse_weather_payload`、`render(..., 1)` 和 `upload`，不调用具有不同天气回退语义的 `dashboard.main()`。天气始终是今天和明天两天。
+
+### 天气校验、缓存和降级
+
+- 请求固定公共 Open-Meteo HTTPS forecast API，传配置坐标、IANA 时区、`forecast_days=2`、摄氏温度及四个 daily 字段。天气请求不携带 Nextcloud 凭据。
+- 单次请求超时参数为 20 秒，最多读取 128 KiB + 1 字节检测超限；不重试。此超时不是整个任务的总时限。
+- `daily.time` 必须**恰好按顺序等于配置时区的今天、明天**；拒绝旧日期、未来错位、缺日、重复、倒序或额外日期。四个数值数组都必须恰好有两个元素。
+- 数值必须是有限 JSON 数字，拒绝字符串、布尔值、null、NaN 和无穷。天气代码必须属于受支持 WMO 代码集合；整数值浮点代码（如 `3.0`）可接受。
+- 每天温度必须满足 `-100 ≤ 最低温 ≤ 最高温 ≤ 70`（摄氏），最大降雨概率为 `0–100`。这是防止异常数据的合理性边界，不是预报准确性保证。显示沿用现有解析器：温度四舍五入，非整数降雨概率截断为整数。
+- 如果 JSON 提供 `daily_units`，必须匹配 ISO 日期、WMO 代码、摄氏和百分比；兼容不带单位元数据的旧缓存。
+- 只有通过全部校验的数据才写同目录临时文件，flush、fsync 后通过 `os.replace` 替换缓存。网络、解析、校验或提交前写入失败时，**旧缓存逐字节保留**；不会先清空或删除它。临时文件会尝试清理。
+- 刷新失败（包括无法保存新数据）时，只使用通过同样日期/数值校验的旧缓存；旧缓存缺失、过期、损坏、过大或不可读则传空天气列表，页面显示“天气暂缺”。不会再由渲染器发起第二次天气请求。
+- 天气阶段后重新取本地时间；如跨过午夜，旧日期数据不用于渲染，而重新检查缓存或显示天气暂缺。页面使用日历请求前的时间快照，不会在慢日历请求/渲染期间再次切换日期。
+
+“新鲜”仅指覆盖当前这两个本地日期：不检查缓存的当天生成时间、不设置小时级 TTL，也不验证缓存来源/地点。换位置或时区后，应换用新的专用缓存路径或自行移走旧缓存，避免在首次刷新失败时沿用另一个位置的预报。
+
+### 更新器退出码与失败行为
+
+| 退出码 | 含义 |
+| --- | --- |
+| `0` | 新天气已写缓存，日历和渲染成功；上传成功、远端内容不变或显式禁用上传 |
+| `1` | 日历获取、天气转换、PNG 渲染或 WebDAV 上传失败；优先于天气降级状态 |
+| `2` | CLI 参数错误，或配置/凭据/依赖加载失败；不开始天气刷新或渲染（`--help` 返回 `0`） |
+| `3` | 日历和渲染成功、上传成功/无需上传，但天气刷新失败或跨午夜失效；使用有效旧缓存或无天气 |
+
+普通错误日志只含阶段和异常类型，不打印密码、端点、坐标、响应正文或日程内容。成功日志标明 `weather=fresh/cache/missing` 和 `upload=uploaded/unchanged/disabled`。中断/强制终止不映射到以上应用退出码。
+
+天气失败不阻断日历更新。日历获取或渲染失败时不会调用上传；缓存刷新是独立提交，之后渲染/上传失败不会回滚已成功刷新过的缓存。PNG 使用现有渲染器的本地原子替换；上传失败可能已经产生新本地 PNG。现有 WebDAV 实现是先 GET 比较再 PUT，**不是临时远端文件加 MOVE 的事务**：上传出错后远端是否变化由服务器/故障阶段决定，不能保证保留旧图。
+
+## 直接运行渲染器
+
+保留原有入口：
+
+```bash
+python dashboard.py --output output/dashboard.png --days 1
+python dashboard.py --no-upload --output output/dashboard.png --days 1
+```
+
+直接入口也不是离线模式。它总会读 CalDAV；`--weather-file` 存在时尝试读取该 JSON，不存在时才请求天气。缓存解析/天气请求出错时显示天气暂缺，**不会自动刷新已存在的缓存，也不执行更新器的严格两日校验**。直接入口的退出码为 `0/1/2`，没有更新器的天气降级码 `3`；推荐定时任务使用更新器。
+
+## 独立调度示例
+
+这些只是供用户部署的模板，脚本不会创建或更改任何调度任务。替换所有 `/path/to/...`，选用一种调度方式，并避免多个任务同时操作同一缓存/图片。更新器没有内置互斥锁；原子替换只防半写文件，不防多进程交错或旧进程覆盖新进程。缓存写入不执行父目录 fsync，不承诺断电后的持久性；强制终止或清理权限故障可能留下临时文件。调度器负责防重入、超时、重试和日志轮转。
+
+### cron（Linux，使用 flock 防重入）
+
+示例中凭据来自仓库外、仅任务账号可读的 shell 环境文件。文件本身是受信任的 shell 输入，不要 source 不可信文件：
+
+```cron
+*/30 * * * * /usr/bin/flock -n /path/to/dashboard.lock /bin/sh -c 'cd /path/to/kindle-calendar-dashboard && set -a && . /path/to/dashboard-credentials.env && set +a && exec .venv/bin/python update_no_model.py' >> /path/to/dashboard-update.log 2>&1
+```
+
+环境文件提供所配置的密码变量，也可提供 `KINDLE_DASHBOARD_CONFIG` 等覆盖值。cron 不继承交互式终端中临时 export 的密码。`flock` 锁冲突也可能返回非零，它的退出码不是更新器退出码。
+
+### systemd 用户定时器（可选替代 cron）
+
+`kindle-dashboard.service` 示例：
+
+```ini
+[Unit]
+Description=Refresh Kindle calendar dashboard
+
+[Service]
+Type=oneshot
+WorkingDirectory=/path/to/kindle-calendar-dashboard
+EnvironmentFile=/path/to/dashboard-credentials.env
+ExecStart=/path/to/kindle-calendar-dashboard/.venv/bin/python update_no_model.py
+TimeoutStartSec=180
+```
+
+`kindle-dashboard.timer` 示例：
+
+```ini
+[Unit]
+Description=Refresh Kindle dashboard every half hour
+
+[Timer]
+OnCalendar=*-*-* *:00,30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+systemd 的环境文件应使用 `NAME=value` 赋值，不写 `export`，也不依赖 shell 命令或变量展开；它与上面的 shell source 语义不同。由用户将模板放到自己的 systemd 用户单元目录、审阅后启用，例如 `systemctl --user enable --now kindle-dashboard.timer`。同一 service 活跃期间不会再次启动，但独立手动/cron 进程仍需自行互斥。默认 systemd 将退出码 `3` 标记为失败，便于发现天气退化；如果只需记录日志而不告警，可在 `[Service]` 显式增加 `SuccessExitStatus=3`。无人登录时是否运行取决于用户服务/linger 的宿主机配置。
+
+建议使用只具备目标日历读取和目标上传目录权限的独立账号、Nextcloud 应用密码，并保护配置和日志。Kindle 越狱后可定时下载 WebDAV 文件或其只读分享链接，再使用 `eips` 刷新屏幕；不要将私人日程分享链接写进公开仓库。
+
+## 离线测试与语法检查
+
+从仓库目录运行；使用公共示例配置而不是个人配置，并清除自己额外设置的 `KINDLE_*` 环境覆盖值。测试不需要应用密码、不执行私有脚本、不调用真实网络或上传，文件写入均在系统临时目录。新测试为天气 HTTP 和渲染/上传编排提供 mocks，并使用 socket 拦截防止意外联网；不会声称已经实测第三方服务。
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 KINDLE_DASHBOARD_CONFIG=config.example.json python -m unittest -v
+PYTHONDONTWRITEBYTECODE=1 python - <<'PY'
+from pathlib import Path
+for name in ('dashboard.py', 'test_dashboard.py', 'update_no_model.py', 'test_update_no_model.py'):
+    compile(Path(name).read_bytes(), name, 'exec')
+print('syntax checks passed; no bytecode written')
+PY
+git diff --check
+```
+
+覆盖正常请求、严格日期/数值/单位校验、超限响应、网络/HTTP/写入失败、旧缓存精确保留、临时文件清理、缺失或不可读缓存、午夜跨日、凭据与端点检查、路径冲突、上传禁用/未变化、阶段失败优先级及退出码。CI 的 `unittest` 自动发现新测试（Python 3.11/3.12/3.13），语法检查同时覆盖两个入口及两个测试文件。测试验证编排接口和数据解析，不验证真实 CalDAV/WebDAV/Open-Meteo 可用性、服务器 PUT 原子性、真实字体视觉效果、调度器或 Kindle 刷屏。
 
 ## 隐私与安全
 
@@ -106,10 +210,10 @@ python -m py_compile dashboard.py
 
 - `config.local.json`、`.env` 或应用密码
 - 真实 CalDAV/WebDAV 地址、用户名、坐标或只读分享链接
-- 生成的日程图片和天气缓存
+- 生成的日程图片、天气缓存、运行日志和凭据环境文件
 - 为个人日历执行的一次性迁移脚本
 
-发布前建议再次运行敏感信息扫描，并检查 Git 历史，而不只是当前工作区。
+`.gitignore` 不保护手工打包整个目录，也不会清除 Git 历史中已有的敏感内容。发布应基于明确审阅的跟踪文件清单或干净 checkout；不要将 `.local/`、本地配置、输出等复制进发布包。发布前检查敏感信息及 Git 历史。最终审计、凭据轮换和发布由仓库所有者负责。
 
 ## 许可证
 

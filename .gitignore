@@ -1,0 +1,19 @@
+# Local credentials, endpoints, coordinates and deployment details
+config.local.json
+.env
+.env.*
+!.env.example
+.local/
+
+# Generated output and caches
+output/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local environments and editor files
+.venv/
+venv/
+.DS_Store
+.idea/
+.vscode/

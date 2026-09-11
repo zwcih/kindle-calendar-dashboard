@@ -1,0 +1,21 @@
+{
+  "nextcloud": {
+    "caldav_url": "https://cloud.example.com/remote.php/dav/calendars/YOUR_USER/YOUR_CALENDAR/",
+    "webdav_url": "https://cloud.example.com/remote.php/dav/files/YOUR_USER/Kindle-dashboard/dashboard.png",
+    "username": "YOUR_USER",
+    "password_env": "NEXTCLOUD_PASSWORD"
+  },
+  "weather": {
+    "latitude": 39.9042,
+    "longitude": 116.4074,
+    "timezone": "Asia/Shanghai"
+  },
+  "display": {
+    "width": 1072,
+    "height": 1448
+  },
+  "fonts": {
+    "regular": "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "bold": "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
+  }
+}

@@ -12,14 +12,22 @@ extract_function() {
     ' "$1"
 }
 extract_between() {
-    awk -v first="$2" -v last="$3" -v relocate="${4:-0}" '
+    # awk -v interprets backslash escapes differently across mawk/gawk.
+    # Environment values preserve exact shell source boundaries, including \.
+    EXTRACT_FIRST="$2" EXTRACT_LAST="$3" awk -v relocate="${4:-0}" '
+        BEGIN { first=ENVIRON["EXTRACT_FIRST"]; last=ENVIRON["EXTRACT_LAST"] }
         $0 == last && copying { finished=1; exit }
         copying {
             if (relocate) sub(/TRIAL" = \/tmp\/calendar-dedicated/, "TRIAL\" = \"$RUN\"")
             print
         }
         $0 == first { copying=1; found=1 }
-        END { if (!found || !finished) exit 1 }
+        END {
+            if (!found || !finished) {
+                print "FIXTURE_EXTRACT_FAILED: source boundary not found" > "/dev/stderr"
+                exit 1
+            }
+        }
     ' "$1"
 }
 asset() {

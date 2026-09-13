@@ -9,6 +9,8 @@ DIR=/mnt/us/kindle-dashboard
 RUN=/tmp/calendar-dedicated
 LOG=$DIR/dedicated-schedule.log
 RTC=/sys/devices/platform/imx-i2c.0/i2c-0/0-003c/max77696-rtc.0
+FBINK=/mnt/us/libkh/bin/fbink
+CALENDAR_STATUS_FILE=$DIR/dashboard.status
 child=
 child_start=
 critical=0
@@ -150,6 +152,35 @@ must() {
 property() {
     run 4 lipc-get-prop "$@" || return "$?"
     value=$(cat "$RUN/output.$$") || return 14
+}
+calendar_display_run() {
+    run "$@"
+}
+calendar_display_ready() {
+    property -i com.lab126.powerd preventScreenSaver && [ "$value" = 1 ] &&
+        property com.lab126.powerd state && [ "$value" = active ] || {
+        record 'CANCEL: cache display requires active power state and owned sleep inhibition.'
+        return 32
+    }
+}
+display_cache() {
+    cache_label=$1
+    calendar_lock_resource || return "$?"
+    CALENDAR_DISPLAY_OUTPUT=$RUN/output.$$
+    if calendar_display_begin; then
+        if cache_sum=$(sha256sum "$DIR/dashboard.png"); then
+            if calendar_status_load "${cache_sum%% *}" &&
+                calendar_display_image "$DIR/dashboard.png"; then cache_rc=0; else cache_rc=$?; fi
+        else
+            log 'STATUS_IO_FAILED: cannot hash cached PNG for its timestamp record.'
+            cache_rc=14
+        fi
+    else
+        cache_rc=$?
+    fi
+    exec 8>&-
+    record "$cache_label: exit=$cache_rc"
+    return "$cache_rc"
 }
 job_state() {
     run 4 initctl status "$1" || return "$?"
@@ -475,21 +506,23 @@ refresh_once() {
     refresh_arg=--dedicated
     if [ "$refresh_kind" = manual ]; then refresh_arg=--dedicated-manual; fi
     record "REFRESH_START: kind=$refresh_kind slot=$slot"
-    if run 80 /bin/sh "$RUN/refresh.sh" "$refresh_arg"; then
+    # Includes worker network (60s), image/overlay (30s), restoration (20s)
+    # and initial dedicated authorization, without truncating its cleanup.
+    if run 120 /bin/sh "$RUN/refresh.sh" "$refresh_arg"; then
         record "REFRESH_EXIT=0 kind=$refresh_kind; see dedicated-refresh.log."
     else
         refresh_rc=$?
         record "REFRESH_EXIT=$refresh_rc kind=$refresh_kind; see dedicated-refresh.log."
         case "$refresh_rc" in
             12|13|30|31) record 'REFRESH_SKIPPED: cached image retained.' ;;
-            15) must CACHE_RESTORE 15 /mnt/us/libkh/bin/fbink -q -c -f -w -V -g "file=$DIR/dashboard.png,w=-1,h=-1" ;;
+            15) display_cache CACHE_RESTORE || exit "$?" ;;
             *) record 'REFRESH_FATAL: restoring reading interface.'; exit "$refresh_rc" ;;
         esac
     fi
 }
 
 for tool in awk cat cp date dd id initctl kdb lipc-get-prop lipc-set-prop \
-    mkdir mktemp mv nohup od readlink rm rmdir setsid sleep tail wc; do
+    mkdir mktemp mv nohup od readlink rm rmdir setsid sha256sum sleep tail wc; do
     command -v "$tool" >/dev/null 2>&1 ||
         { printf 'Missing dedicated-mode tool: %s\n' "$tool" >&2; exit 10; }
 done
@@ -515,6 +548,9 @@ case "${1-}" in
             { printf 'CONFIG_ERROR: calendar-config.sh is missing or unsafe.\n' >&2; exit 10; }
         . "$CONFIG_DIR/calendar-config.sh"
         calendar_load_config "$CONFIG_DIR/config.local.conf" || exit 10
+        [ -f "$CONFIG_DIR/calendar-display.sh" ] && [ ! -L "$CONFIG_DIR/calendar-display.sh" ] ||
+            { printf 'DISPLAY_DEPENDENCY: calendar-display.sh is missing or unsafe.\n' >&2; exit 10; }
+        . "$CONFIG_DIR/calendar-display.sh"
         ;;
 esac
 
@@ -535,7 +571,8 @@ case "${1-}" in
             # Only this controller's fixed runtime files are removed.
             for file in controller.sh refresh.sh owner guard guard-ready restored old-light old-sleep console.log child \
                 deadline touch touch-child touch-ready touch-required touch-event touch.err stop-requested stopping \
-                gesture-held manual-refresh touch-decoded calendar-config.sh config.local.conf calendar-lock.sh; do
+                gesture-held manual-refresh touch-decoded calendar-config.sh config.local.conf calendar-lock.sh \
+                calendar-display.sh; do
                 rm -f "$RUN/$file" || exit 14
             done
             # Per-process command captures are retained in the existing runtime directory.
@@ -547,6 +584,7 @@ case "${1-}" in
             cp "$DIR/calendar-auto-refresh.sh" "$RUN/refresh.sh" &&
             cp "$DIR/calendar-config.sh" "$RUN/calendar-config.sh" &&
             cp "$DIR/calendar-lock.sh" "$RUN/calendar-lock.sh" &&
+            cp "$DIR/calendar-display.sh" "$RUN/calendar-display.sh" &&
             cp "$DIR/config.local.conf" "$RUN/config.local.conf" || exit 14
         calendar_load_config "$RUN/config.local.conf" || exit 10
         # FD 9 crosses nohup/setsid/exec and remains held by the controller,
@@ -705,7 +743,7 @@ for job in lab126_gui framework pillow webreader; do
 done
 critical=0
 [ ! -f "$RUN/stop-requested" ] || exit 0
-must CACHE_DISPLAY 15 /mnt/us/libkh/bin/fbink -q -c -f -w -V -g "file=$DIR/dashboard.png,w=-1,h=-1"
+display_cache CACHE_DISPLAY || exit "$?"
 nohup setsid /bin/sh "$RUN/controller.sh" --touch "$$" "$owner_start" </dev/null >/dev/null 2>&1 &
 for attempt in 1 2 3 4 5; do
     [ ! -f "$RUN/touch-ready" ] || break

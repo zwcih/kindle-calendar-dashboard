@@ -5,7 +5,7 @@
 | 部分 | 源码 | 职责 |
 | --- | --- | --- |
 | 服务端 | `dashboard.py`、`update_no_model.py` | 获取日历和天气、生成图片、可选 WebDAV 上传；由用户安排服务端调度 |
-| 客户端 | `kindle/kindle-dashboard/`、`kindle/documents/` | 手动刷新、UTC+8 06:30–22:00 半小时刷新、真实休眠、触摸退出与界面恢复 |
+| 客户端 | `kindle/kindle-dashboard/`、`kindle/documents/` | 手动刷新、半小时刷新、底部本地电量／内容更新时间、真实休眠、触摸退出与界面恢复 |
 
 已有可用图片地址时，可直接按下方客户端快速开始部署；需要自行生成图片则继续阅读[服务端安装](#服务端安装)。
 
@@ -29,6 +29,7 @@ kindle-dashboard/
   calendar-auto-refresh.sh
   calendar-config.sh
   calendar-lock.sh
+  calendar-display.sh
   config.example.conf
   config.local.conf              # 本地私有配置，不在仓库中
 ```
@@ -38,9 +39,13 @@ kindle-dashboard/
 
 使用时：**电源键唤醒 → 单指短按松开刷新 → 单指按住至少 2 秒再松开退出**；也可从书库运行“退出日程专用模式”。退出恢复 GUI、Home、原前光和原生睡眠。多指期间不识别新单指手势，直到所有触点释放。电量未知或不超过 20% 且未充电时不联网；手动请求只跳过安静时段，不跳过电量与所有权检查。
 
-**从旧版升级**：先用旧入口正常退出并确认恢复，再正常重启 Kindle（不是恢复出厂设置或固件升级），之后连接 USB 更新全部四个运行脚本／库及三个书库入口，保留有效私有配置，安全弹出后再使用。不要混用旧运行快照，也不要另留一套旧命名入口来启动旧版本。不要手工删除旧 `.lock` 目录或新版 `.flock` 文件来“解锁”；启动者、worker 与存活子进程的互斥由内核锁管理。
+**本地状态栏**：跟随原有的实际整图显示，在图片底部 **36 像素（`y=1412..1447`）**叠加本地电量和 `Updated` 内容更新时间。**图片提供方必须先留出这条白色空栏**；本次不修改服务端生成器，现有图片没有留白时会遮住原内容，不能直接当作布局已兼容。电量来自本机 LIPC，仅表示上次实际显示时的采样，不是实时监控；不增加定时器、网络接口或唤醒。**专用模式图片 SHA 未变时不刷新任何区域，也不额外采样电量**，保留原有省电跳过行为。
 
-当前版本已实测独立手动下载／显示／缓存、专用模式启动与再次启动、真实休眠、单指刷新和长按退出的完整恢复；独立并发、严格 SIGKILL 与恢复套件已在 Linux `/bin/sh=dash` 全部通过。**完整崩溃套件未在 Kindle 上跑完，物理多指序列、新版半小时自动时隙及整夜运行仍未验证**。详见[客户端依赖、配置与排障](kindle/README.md)。
+`Updated` 使用 UTC+8 日期与时间，指**客户端成功显示内容变化的时刻**，不是上游编辑时间或每次联网时间。与原始 PNG SHA 绑定的 `dashboard.status` 在缓存提交后原子发布；同 SHA 的刷新、独立手动重画和缓存恢复不推进时间。旧缓存无可信记录或记录失配时显示 `--` 并记录原因，不用开机时间补造。原始 PNG 和 SHA 不含状态栏；读取、绘制或时间记录失败会明确报错，不能当作全部成功。详见[失败语义及部署约定](kindle/README.md#本地状态栏与内容更新时间)。
+
+**从旧版升级**：先用旧入口正常退出并确认恢复，再正常重启 Kindle（不是恢复出厂设置或固件升级），之后连接 USB 更新全部五个运行脚本／库及三个书库入口，保留有效私有配置，安全弹出后再使用。不要混用旧运行快照，也不要另留一套旧命名入口来启动旧版本。不要手工删除旧 `.lock` 目录或新版 `.flock` 文件来“解锁”；启动者、worker 与存活子进程的互斥由内核锁管理。
+
+**加入状态栏之前的版本**已实测独立手动下载／显示／缓存、专用模式启动与再次启动、真实休眠、单指刷新和长按退出的完整恢复；独立并发、严格 SIGKILL 与恢复套件已在 Linux `/bin/sh=dash` 全部通过。**本次状态栏未部署到 Kindle，字形、局部刷新及新链路未做真机验收**；完整崩溃套件未在 Kindle 上跑完，物理多指序列、新版半小时自动时隙及整夜运行仍未验证。详见[客户端依赖、配置与排障](kindle/README.md)。
 
 ## 服务端特性
 
@@ -61,7 +66,8 @@ update_no_model.py (standalone, no model/agent runtime)
   │                 failure → valid same-date cache or no weather
   └─ dashboard.py functions: CalDAV → local grayscale PNG → optional WebDAV PUT
                                                            ↓ HTTPS PNG
-Kindle: calendar-auto-refresh.sh → validate PNG → FBInk → atomic local cache
+Kindle: calendar-auto-refresh.sh → validate PNG → image + local status → atomic original cache / SHA-bound time
+        calendar-display.sh → bounded FBInk + local battery / content timestamp
         calendar-dedicated.sh → half-hour schedule / real suspend / UI recovery
 ```
 
@@ -247,7 +253,7 @@ git diff --check
 
 覆盖正常请求、严格日期/数值/单位校验、超限响应、网络/HTTP/写入失败、旧缓存精确保留、临时文件清理、缺失或不可读缓存、午夜跨日、凭据与端点检查、路径冲突、上传禁用/未变化、阶段失败优先级及退出码。CI 的 `unittest` 自动发现新测试（Python 3.11/3.12/3.13），语法检查同时覆盖两个入口及两个测试文件。测试验证编排接口和数据解析，不验证真实 CalDAV/WebDAV/Open-Meteo 可用性、服务器 PUT 原子性、真实字体视觉效果、调度器或 Kindle 刷屏。
 
-客户端隔离测试运行 `python -m unittest -v test_kindle test_kindle_locks`：手势、配置及打包用例需要 POSIX `sh`，真实锁并发用例另外需要 Linux `/proc` 和 `flock`，在 Windows 会明确跳过。它们不运行完整设备脚本、不访问 USB；测试方法与验证边界见 [Kindle 设备端](kindle/README.md#本机开发检查)。
+客户端隔离测试运行 `python -m unittest -v test_kindle test_kindle_display test_kindle_locks`：手势、配置、状态栏及打包用例需要 POSIX `sh`，真实锁并发用例另外需要 Linux `/proc` 和 `flock`，在 Windows 会明确跳过。它们不运行完整设备脚本、不访问 USB；测试方法与验证边界见 [Kindle 设备端](kindle/README.md#本机开发检查)。
 
 ## 隐私与安全
 

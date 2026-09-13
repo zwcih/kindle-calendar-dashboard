@@ -33,6 +33,7 @@ install_fixture() {
     cp "$FIXTURE/actor.sh" "$DIR/calendar-auto-refresh.sh"
     cp "$FIXTURE/config.sh" "$DIR/calendar-config.sh"
     cp "$FIXTURE/lock.sh" "$DIR/calendar-lock.sh"
+    cp "$FIXTURE/display.sh" "$DIR/calendar-display.sh"
     printf '%s\n' 'IMAGE_URL=https://calendar.invalid/image.png' 'WIFI_SSID=fixture-network' > "$DIR/config.local.conf"
 }
 start_busy() {
@@ -360,7 +361,7 @@ for initial in first restored; do
         if [ "$phase" = before-copy ]; then
             [ ! -f "$RUN/controller.sh" ] || fail 'copy occurred before copy barrier'
         else
-            for copied in controller.sh refresh.sh calendar-config.sh calendar-lock.sh config.local.conf; do
+            for copied in controller.sh refresh.sh calendar-config.sh calendar-lock.sh calendar-display.sh config.local.conf; do
                 [ -f "$RUN/$copied" ] || fail "missing packaged file $copied"
             done
         fi

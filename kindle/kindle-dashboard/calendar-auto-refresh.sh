@@ -9,6 +9,7 @@ set -f
 
 DIR=/mnt/us/kindle-dashboard
 IMAGE=$DIR/dashboard.png
+CALENDAR_STATUS_FILE=$DIR/dashboard.status
 LOG=$DIR/auto-refresh.log
 TRIAL=/tmp/calendar-dedicated-trial
 dedicated_trial=0
@@ -27,6 +28,9 @@ calendar_load_config "$CONFIG_DIR/config.local.conf" || exit 10
     { printf 'LOCK_DEPENDENCY: calendar-lock.sh is missing or unsafe.\n' >&2; exit 10; }
 . "$CONFIG_DIR/calendar-lock.sh"
 calendar_lock_require || exit "$?"
+[ -f "$CONFIG_DIR/calendar-display.sh" ] && [ ! -L "$CONFIG_DIR/calendar-display.sh" ] ||
+    { printf 'DISPLAY_DEPENDENCY: calendar-display.sh is missing or unsafe.\n' >&2; exit 10; }
+. "$CONFIG_DIR/calendar-display.sh"
 URL=$IMAGE_URL
 WORK=
 child_pid=
@@ -177,6 +181,48 @@ bounded() {
     child_pid=
     child_start=
     return "$command_status"
+}
+
+calendar_display_run() {
+    bounded "$@"
+}
+
+calendar_display_ready() {
+    window_gate || { log 'CANCEL: rendering outside allowed window or clock unreadable.'; exit 32; }
+    check_sleep
+}
+
+display_refresh() {
+    if [ "$new_hash" = "$old_hash" ] && [ "$standalone_manual" = 0 ]; then
+        log "UNCHANGED: sha256=$new_hash; no display, battery sample or timestamp replacement."
+        return "$?"
+    fi
+    window_gate || { log 'CANCEL: rendering outside allowed window or clock unreadable.'; return 32; }
+    monotime || { log 'RENDER_FAILED: monotonic clock unreadable.'; return 15; }
+    deadline=$((mono + 30))
+    CALENDAR_DISPLAY_DEADLINE=$deadline
+    CALENDAR_DISPLAY_OUTPUT=$WORK/output
+    calendar_status_load "$old_hash" || return "$?"
+    display_change=unchanged
+    if [ "$new_hash" != "$old_hash" ]; then display_change=changed; fi
+    calendar_display_image "$WORK/download.png" "$display_change" || return "$?"
+    if [ "$display_change" = changed ]; then
+        if ! printf '%s\n%s\n' "$new_hash" "$CALENDAR_STATUS_TIME" > "$WORK/status.next"; then
+            log 'STATUS_IO_FAILED: timestamp staging failed; cache and previous record retained; display may be provisional.'
+            return 14
+        fi
+    fi
+    if [ -L "$IMAGE" ] || { [ -e "$IMAGE" ] && [ ! -f "$IMAGE" ]; } ||
+        ! mv -f "$WORK/download.png" "$IMAGE"; then
+        log 'IO_FAILED: display succeeded but atomic image commit failed.'
+        return 14
+    fi
+    if [ "$display_change" = changed ] &&
+        ! mv -f "$WORK/status.next" "$CALENDAR_STATUS_FILE"; then
+        log 'STATUS_IO_FAILED: PNG committed but timestamp publication failed; mismatched record must display --; refresh not fully successful.'
+        return 14
+    fi
+    log "UPDATED: image and battery displayed; original PNG atomically committed; sha256=$new_hash bytes=$size"
 }
 
 window_gate() {
@@ -389,7 +435,7 @@ cleanup() {
             case "$final_status" in 129|130|143|20) ;; *) final_status=14 ;; esac
             report "LOG_IO_FAILED: final exit=$final_status"
         fi
-        if ! rm -f "$WORK/output" "$WORK/download.png" "$WORK/curl.err" \
+        if ! rm -f "$WORK/output" "$WORK/download.png" "$WORK/curl.err" "$WORK/status.next" \
             "$WORK/log.line" "$WORK/log.next" || ! rmdir "$WORK"; then
             report "CLEANUP_FAILED: owned workspace $WORK"
             case "$final_status" in 129|130|143|20) ;; *) final_status=14 ;; esac
@@ -643,27 +689,5 @@ for hash in "$new_hash" "${old_hash:-$new_hash}"; do
     case "$hash" in ''|*[!0-9a-f]*) log 'IO_FAILED: invalid SHA-256 output.'; exit 14 ;; esac
     [ "${#hash}" = 64 ] || { log 'IO_FAILED: incomplete SHA-256 output.'; exit 14; }
 done
-if [ "$new_hash" = "$old_hash" ] && [ "$standalone_manual" = 0 ]; then
-    log "UNCHANGED: sha256=$new_hash; no FBInk and no image replacement."
-    exit 0
-fi
-
-window_gate || { log 'CANCEL: rendering outside allowed window or clock unreadable.'; exit 32; }
-monotime || { log 'RENDER_FAILED: monotonic clock unreadable.'; exit 15; }
-deadline=$((mono + 15))
-# The last external state query immediately precedes the bounded display call.
-check_sleep
-if bounded 15 "$FBINK" -q -c -f -w -V -g "file=$WORK/download.png,w=-1,h=-1"; then
-    if [ -L "$IMAGE" ] || { [ -e "$IMAGE" ] && [ ! -f "$IMAGE" ]; } ||
-        ! mv -f "$WORK/download.png" "$IMAGE"; then
-        log 'IO_FAILED: render succeeded but atomic image commit failed.'
-        exit 14
-    fi
-    log "UPDATED: rendered and atomically committed; sha256=$new_hash bytes=$size"
-else
-    render_rc=$?
-    detail=$(tail -c 1024 "$WORK/output")
-    log "RENDER_FAILED: exit=$render_rc; cached image preserved; framebuffer may already be cleared. $detail"
-    exit 15
-fi
-exit 0
+display_refresh
+exit "$?"

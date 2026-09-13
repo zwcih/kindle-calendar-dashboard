@@ -34,7 +34,7 @@ def forbidden_path(path):
     n = p.name.lower()
     if n.startswith('.env') and n != '.env.example':
         return True
-    if n == 'config.local.json' or '.local.' in n or n in {'wifi-ssid.conf', 'github-pat', 'id_rsa', 'id_ed25519'}:
+    if n == 'config.local.json' or '.local.' in n or n in {'wifi-ssid.conf', 'github-pat', 'id_rsa', 'id_ed25519', 'dashboard.status'}:
         return True
     return p.suffix.lower() in {'.png', '.jpg', '.jpeg', '.pdf', '.ics', '.log', '.bak', '.backup', '.pem', '.key', '.p12', '.pyc'} or (n.startswith('config') and n.endswith('.conf') and n != 'config.example.conf')
 

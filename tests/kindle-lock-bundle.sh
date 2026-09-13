@@ -41,6 +41,9 @@ end_asset
 asset config.sh
 cat kindle/kindle-dashboard/calendar-config.sh
 end_asset
+asset display.sh
+cat kindle/kindle-dashboard/calendar-display.sh
+end_asset
 asset actual.sh
 for name in identity alive signal_exit request_stop lease guard_ok honor_signal cancel_child run \
     read_number stop_touch restore; do

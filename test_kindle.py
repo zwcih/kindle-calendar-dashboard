@@ -271,7 +271,8 @@ class KindleShellTests(unittest.TestCase):
     def test_start_packages_config_and_helper_without_launching_device_code(self):
         directory = self.work / "installed"
         directory.mkdir()
-        for name in ("calendar-auto-refresh.sh", "calendar-config.sh", "calendar-lock.sh"):
+        for name in ("calendar-auto-refresh.sh", "calendar-config.sh", "calendar-lock.sh",
+                     "calendar-display.sh"):
             shutil.copyfile(DEVICE / name, directory / name)
         (directory / "config.local.conf").write_text(
             f"IMAGE_URL={URL}\nWIFI_SSID=fixture network\n", encoding="utf-8"
@@ -292,7 +293,7 @@ class KindleShellTests(unittest.TestCase):
         result = self.shell(source)
         self.assertEqual(result.returncode, 0, result.stderr)
         for name in ("controller.sh", "refresh.sh", "calendar-config.sh",
-                     "calendar-lock.sh", "config.local.conf"):
+                     "calendar-lock.sh", "calendar-display.sh", "config.local.conf"):
             self.assertTrue((self.work / "runtime" / name).is_file(), name)
         runtime = shlex.quote((self.work / "runtime").as_posix())
         result = self.shell(
@@ -302,7 +303,7 @@ class KindleShellTests(unittest.TestCase):
         )
         self.assertEqual(result.stdout, "fixture network\n")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('run 80 /bin/sh "$RUN/refresh.sh" "$refresh_arg"', CONTROLLER)
+        self.assertIn('run 120 /bin/sh "$RUN/refresh.sh" "$refresh_arg"', CONTROLLER)
         self.assertIn('"$@" > "$RUN/output.$$" 2>&1 &', CONTROLLER)
         self.assertIn("/tmp/calendar-dedicated/refresh.sh) CONFIG_DIR=/tmp/calendar-dedicated", WORKER)
 
@@ -311,7 +312,8 @@ class KindleShellTests(unittest.TestCase):
         self.assertLess(CONTROLLER.index("calendar_load_config"), CONTROLLER.index("must GUI_STOP"))
         self.assertIn('--start|--run)', CONTROLLER)
         self.assertLess(WORKER.index("calendar_load_config"), WORKER.index("trap cleanup"))
-        self.assertLess(WORKER.index('bounded 15 "$FBINK"'), WORKER.index('! mv -f "$WORK/download.png"'))
+        self.assertLess(WORKER.index('calendar_display_image "$WORK/download.png"'),
+                        WORKER.index('! mv -f "$WORK/download.png"'))
         self.assertIn("curl -q --globoff", WORKER)
         self.assertIn("--proto '=https' --proto-redir '=https'", WORKER)
         self.assertIn('[ "$battery" -le 20 ] && [ "$charging" = 0 ]', WORKER)

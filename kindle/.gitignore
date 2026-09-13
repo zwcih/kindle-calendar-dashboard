@@ -22,3 +22,4 @@ wifi-ssid.conf
 backups/
 cache/
 runtime/
+dashboard.status

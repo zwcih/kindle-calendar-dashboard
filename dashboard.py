@@ -83,6 +83,8 @@ PASSWORD_ENV = NEXTCLOUD["password_env"]
 FONT_REGULAR = CONFIG["fonts"]["regular"]
 FONT_BOLD = CONFIG["fonts"]["bold"]
 W, H = int(CONFIG["display"]["width"]), int(CONFIG["display"]["height"])
+# Bottom strip is exclusively reserved for client-rendered battery/status text.
+STATUS_BAR_HEIGHT = 36
 
 @dataclass(frozen=True)
 class Event:
@@ -282,6 +284,16 @@ def format_cn_time(value: datetime) -> str:
     return f"{period}{display}:{value.minute:02d}"
 
 
+def highlight_due(event: Event, now: datetime) -> bool:
+    """Timed events active now or starting within two hours (inclusive)."""
+    if event.all_day:
+        return False
+    start = event.start.astimezone(TZ)
+    now = now.astimezone(TZ)
+    active = event.end is not None and start <= now < event.end.astimezone(TZ)
+    return active or now <= start <= now + timedelta(hours=2)
+
+
 def render(events: list[Event], weather: list[WeatherDay], now: datetime, output: Path, days: int) -> None:
     img=Image.new("L",(W,H),255); d=ImageDraw.Draw(img); margin=52
     def font(sz,bold=False): return ImageFont.truetype(FONT_BOLD if bold else FONT_REGULAR,sz)
@@ -385,20 +397,23 @@ def render(events: list[Event], weather: list[WeatherDay], now: datetime, output
                     continue
             title_value=clean_title(event.title)
             if title_value.startswith("学校·"):
-                rows.append(("校内",title_value.removeprefix("学校·")))
+                rows.append(("校内",title_value.removeprefix("学校·"),highlight_due(event,local_now)))
             else:
-                rows.append((time_range(event),title_value))
+                rows.append((time_range(event),title_value,highlight_due(event,local_now)))
         return rows
 
     today_rows=day_rows(today)
     tomorrow=today+timedelta(days=1)
     tomorrow_rows=day_rows(tomorrow)
 
+    first_row_drawn=False
+
     def draw_day(day,label,rows,top,bottom,compact=False):
+        nonlocal first_row_drawn
         box((24,top,W-24,bottom),26,fill=255,outline=0,width=4)
         header_h=132 if compact else 154
         label_size=58 if compact else 72
-        date_size=30 if compact else 36
+        date_size=34 if compact else 40
         center_y=top+header_h//2-4
         text(58,center_y,label,label_size,True,anchor="lm")
         text(218 if compact else 246,center_y,
@@ -439,43 +454,71 @@ def render(events: list[Event], weather: list[WeatherDay], now: datetime, output
         inner_left=76; inner_right=W-76; inner_w=inner_right-inner_left
         # One shared time column keeps every row aligned. The title receives all
         # remaining width and grows independently for short labels.
-        split_times=[split_time_label(tm) for tm,_ in rows[:shown]]
-        time_col=248 if compact else 268
+        split_times=[split_time_label(tm) for tm,_,_ in rows[:shown]]
+        time_col=194 if compact else 214
         title_x=inner_left+time_col+34
         title_w=inner_right-title_x
-        for (tm,title_value),(period,clock) in zip(rows[:shown],split_times):
+        # Fit mixed-size period/time labels; center each complete line without leading zeros.
+        shared_clock_size=min(66 if compact else 74,max(28,(row_h-38)//3))
+        while shared_clock_size>24:
+            label_size=round(shared_clock_size*.64)
+            required=d.textlength("上",font=font(label_size,True))+4+d.textlength("00:00",font=font(shared_clock_size,True))
+            if required<=time_col: break
+            shared_clock_size-=1
+        shared_period_size=round(shared_clock_size*.64)
+        for (tm,title_value,due),(period,clock) in zip(rows[:shown],split_times):
             card_bottom=y+row_h-12
-            box((52,y,W-52,card_bottom),22,fill=244,outline=145,width=2)
+            highlighted=not first_row_drawn and due
+            first_row_drawn=True
+            row_text=255 if highlighted else 0
+            box((52,y,W-52,card_bottom),22,fill=0 if highlighted else 244,outline=0 if highlighted else 145,width=2)
             center_y=(y+card_bottom)//2
-            period_size=min(34 if compact else 38,max(25,row_h//6))
-            clock_size=fit_size(clock,time_col,min(55 if compact else 61,max(38,row_h//3)),30)
+            clocks=clock.split("–")
             if period:
-                text(inner_left+time_col//2,center_y-clock_size//2-15,period,period_size,True,fill=45,anchor="mm")
-                text(inner_left+time_col//2,center_y+period_size//2+10,clock,clock_size,True,anchor="mm")
+                periods=period.split("–")
+                if len(periods)==1: periods=periods*len(clocks)
+                clock_size=shared_clock_size
+                period_size=shared_period_size
+                offset=min(round(clock_size*1.12),(row_h-34-clock_size)//2)
+                for idx,part in enumerate(clocks):
+                    clock_y=center_y if len(clocks)==1 else center_y+(-offset if idx==0 else offset)
+                    period_text=periods[min(idx,len(periods)-1)].replace("午", "")
+                    period_width=d.textlength(period_text,font=font(period_size,True))
+                    number_width=d.textlength(part,font=font(clock_size,True))
+                    line_left=inner_left+(time_col-period_width-4-number_width)/2
+                    text(line_left,clock_y,period_text,period_size,True,fill=row_text,anchor="lm")
+                    text(line_left+period_width+4,clock_y,part,clock_size,True,fill=row_text,anchor="lm")
+                if len(clocks)==2:
+                    text(inner_left+time_col//2,center_y,"—",max(24,clock_size-8),True,fill=row_text,anchor="mm")
             else:
-                text(inner_left+time_col//2,center_y,clock,clock_size,True,anchor="mm")
+                clock_size=fit_size(clock,time_col,min(68,max(32,row_h//3)),26)
+                text(inner_left+time_col//2,center_y,clock,clock_size,True,fill=row_text,anchor="mm")
             d.line((title_x-18,y+22,title_x-18,card_bottom-22),fill=175,width=2)
-            title_start=min(112 if not compact else 82,max(48,round(row_h*.48)))
-            # Prefer two large lines for a long title instead of shrinking it
-            # into one small line. Short titles remain a single extra-large line.
+            title_start=min(130 if not compact else 98,max(48,round(row_h*.48)))
+            # Keep near-fitting titles at their largest single-line size;
+            # only switch to two lines when a single line would be too small.
+            single_size=fit_size(title_value,title_w,title_start,38)
+            if single_size >= min(title_start,84 if compact else 100):
+                title_start=single_size
             if d.textlength(title_value,font=font(title_start,True))>title_w:
-                title_size=min(title_start,64 if compact else 72)
-                title_lines=wrap_text(title_value,title_size,title_w,2)
+                title_size=min(title_start,78 if compact else 90)
+                title_lines=wrap_text(title_value,title_size,title_w,max(2,len(title_value)))
                 while title_size>38 and (len(title_lines)>2 or len(title_lines)*round(title_size*1.16)>row_h-34):
                     title_size-=2
-                    title_lines=wrap_text(title_value,title_size,title_w,2)
+                    title_lines=wrap_text(title_value,title_size,title_w,max(2,len(title_value)))
+                title_lines=wrap_text(title_value,title_size,title_w,2)
                 line_h=round(title_size*1.16)
                 first_y=center_y-(len(title_lines)-1)*line_h//2
                 for part in title_lines:
-                    text(title_x+title_w//2,first_y,part,title_size,True,anchor="mm")
+                    text(title_x+title_w//2,first_y,part,title_size,True,fill=row_text,anchor="mm")
                     first_y+=line_h
             else:
-                text(title_x+title_w//2,center_y,title_value,title_start,True,anchor="mm")
+                text(title_x+title_w//2,center_y,title_value,title_start,True,fill=row_text,anchor="mm")
             y+=row_h
         if overflow:
             text(W//2,bottom-43,f"明天还有 {overflow} 项",30,True,fill=55,anchor="ma")
 
-    top=24; bottom=H-24; gap=18
+    top=24; bottom=H-STATUS_BAR_HEIGHT-12; gap=18
     if not today_rows:
         # Once today is finished, tomorrow takes the whole screen.
         draw_day(tomorrow,"明天",tomorrow_rows,top,bottom)

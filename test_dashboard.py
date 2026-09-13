@@ -6,6 +6,48 @@ from pathlib import Path
 from dashboard import Event, parse_calendar_data, parse_ical_datetime, clean_title, format_cn_time, load_config, parse_weather_payload, request, TZ
 
 class DashboardTests(unittest.TestCase):
+    def test_highlight_due_boundaries(self):
+        from datetime import datetime, timedelta
+        from dashboard import highlight_due
+        now=datetime(2030,1,2,10,tzinfo=TZ)
+        def event(start,end=None,all_day=False):
+            return Event(uid="synthetic",title="Example",start=start,end=end,all_day=all_day,location="")
+        self.assertTrue(highlight_due(event(now+timedelta(hours=2)),now))
+        self.assertFalse(highlight_due(event(now+timedelta(hours=2,seconds=1)),now))
+        self.assertTrue(highlight_due(event(now-timedelta(hours=1),now+timedelta(hours=1)),now))
+        self.assertFalse(highlight_due(event(now-timedelta(hours=1),now),now))
+        self.assertFalse(highlight_due(event(now-timedelta(minutes=1)),now))
+        self.assertFalse(highlight_due(event(now,all_day=True),now))
+
+    def test_client_status_strip_stays_blank(self):
+        from datetime import datetime, timedelta
+        from unittest.mock import patch
+        from PIL import Image
+        import dashboard as d
+        # Use a portable host font; this test checks pixels/bounds, not CJK glyphs.
+        from PIL import ImageFont
+        try:
+            font_path=ImageFont.truetype("DejaVuSans.ttf",24).path
+        except OSError:
+            self.skipTest("A host TrueType font is required for rendering")
+        now=datetime(2030,1,2,8,tzinfo=TZ)
+        for count in (0,1,2,5,12):
+            with self.subTest(count=count), tempfile.TemporaryDirectory() as tmp:
+                events=[]
+                for day_offset,n in ((0,count),(1,8)):
+                    for i in range(n):
+                        start=now+timedelta(days=day_offset,hours=i+1)
+                        events.append(Event(uid=f"fixture-{day_offset}-{i}",title="Example event",
+                                            start=start,end=start+timedelta(minutes=45),all_day=False,location=""))
+                out=Path(tmp)/"test.png"
+                with patch.object(d,"FONT_REGULAR",font_path), patch.object(d,"FONT_BOLD",font_path):
+                    d.render(events,[],now,out,1)
+                with Image.open(out) as image:
+                    self.assertEqual(image.size,(d.W,d.H))
+                    self.assertEqual(image.mode,"L")
+                    self.assertEqual(image.crop((0,d.H-d.STATUS_BAR_HEIGHT,d.W,d.H)).getextrema(),(255,255))
+                    self.assertEqual(image.crop((0,0,d.W,d.H-d.STATUS_BAR_HEIGHT)).getextrema()[0],0)
+
     def test_utc_timezone(self):
         dt, allday=parse_ical_datetime('DTSTART','20260912T010000Z')
         self.assertFalse(allday); self.assertEqual((dt.hour,dt.minute),(9,0))

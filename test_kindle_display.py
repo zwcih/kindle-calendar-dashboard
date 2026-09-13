@@ -38,6 +38,18 @@ class KindleDisplayTests(unittest.TestCase):
             cwd=self.work, capture_output=True, timeout=timeout,
         )
 
+    @staticmethod
+    def info(width=1072, height=1448, rotation=0):
+        # Official -e assignment syntax with synthetic values, never device output.
+        fields = {
+            "screenWidth": width, "screenHeight": height,
+            "viewWidth": width, "viewHeight": height,
+            "viewHoriOrigin": 0, "viewVertOrigin": 0, "viewVertOffset": 0,
+            "currentRota": rotation, "FONTW": 8, "FONTH": 8,
+            "FONTSIZE_MULT": 1, "isKindleLegacy": 0,
+        }
+        return "".join(f"{key}={value};" for key, value in fields.items()) + "FBINK_VERSION='v1.25.0';FONTNAME='IBM';"
+
     def fixture(self):
         return DISPLAY + "\n" + function(WORKER, "display_refresh") + f"""
 WORK=./work
@@ -49,6 +61,10 @@ CALENDAR_DISPLAY_DEADLINE=130
 CALENDAR_STATUS_TIME='{OLD_TIME}'
 FBINK=fbink
 FBINK_HELP=' -k, --cls [top=NUM,left=NUM,width=NUM,height=NUM]'
+FBINK_INFO={shlex.quote(self.info())}
+display_width=1072
+display_height=1448
+display_rotation=0
 old_hash={OLD_HASH}
 new_hash={NEW_HASH}
 standalone_manual=0
@@ -78,6 +94,8 @@ calendar_display_run() {{
         fbink)
             if [ "$2" = --help ]; then
                 printf '%s\\n' "$FBINK_HELP" > "$CALENDAR_DISPLAY_OUTPUT"
+            elif [ "$2" = -e ]; then
+                printf '%s' "$FBINK_INFO" > "$CALENDAR_DISPLAY_OUTPUT"
             elif [ "$CALLS" = "$WARN_AT" ]; then
                 printf '[FBInk] Failed to wait for completion of update 42!\\n' > "$CALENDAR_DISPLAY_OUTPUT"
             else
@@ -87,6 +105,7 @@ calendar_display_run() {{
         *) printf 'UNEXPECTED_HARDWARE_COMMAND\\n' >&2; return 99 ;;
     esac
 }}
+calendar_display_layout || exit "$?"
 """
 
     def calls(self):
@@ -104,8 +123,9 @@ calendar_display_run() {{
         self.assertIn("UPDATED:", self.events())
         calls = self.calls()
         self.assertIn("--help", calls[0])
-        self.assertIn("-g file=./work/download.png,w=-1,h=-1", calls[1])
-        self.assertIn("battLevel", calls[2])
+        self.assertEqual(calls[1], "fbink -e -V -F IBM -S 1")
+        self.assertIn("-g file=./work/download.png,w=-1,h=-1", calls[2])
+        self.assertIn("battLevel", calls[3])
         self.assertEqual(sum("battLevel" in call for call in calls), 1)
         self.assertFalse(any("isCharging" in call for call in calls))
         self.assertTrue(any("73%" in call for call in calls))
@@ -149,11 +169,18 @@ display_refresh
         self.assertFalse((self.work / "clock.calls").exists())
 
     def test_all_battery_values_and_digit_transitions(self):
-        for value in (100, 99, 10, 9, 0, *range(101)):
-            with self.subTest(value=value):
+        cases = (
+            (w, h, scale, value)
+            for w, h, scale in ((758, 1024, 2), (1072, 1448, 3),
+                                (1024, 758, 2), (1448, 1072, 3), (600, 1448, 2))
+            for value in (100, 99, 10, 9, 0, *range(101))
+        )
+        for screen_w, screen_h, scale, value in cases:
+            with self.subTest(size=(screen_w, screen_h), value=value):
                 (self.work / "calls").write_text("")
                 result = self.shell(
-                    self.fixture() + f"\nBATTERY={value}\nCALENDAR_STATUS_TIME=--\n"
+                    self.fixture() + f"\nBATTERY={value}\ndisplay_width={screen_w}\ndisplay_height={screen_h}\n"
+                    + "calendar_display_layout || exit $?\n"
                     + "calendar_display_battery\n"
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -171,37 +198,139 @@ display_refresh
                         texts.append(args)
                 self.assertGreaterEqual(len(rectangles), 4)
                 clear_args, clear = rectangles[0]
-                self.assertEqual(clear, {"top": 1412, "left": 0, "width": 1072, "height": 36})
+                bar_h = 36 * screen_h // 1448
+                bar_top = screen_h - bar_h
+                self.assertEqual(clear, {"top": bar_top, "left": 0, "width": screen_w, "height": bar_h})
+                self.assertGreaterEqual(bar_top * 1448, 1412 * screen_h)
+                self.assertLess((bar_top - 1) * 1448, 1412 * screen_h)
                 self.assertIn("WHITE", clear_args)
                 for args, rect in rectangles:
-                    self.assertGreaterEqual(rect["top"], 1412)
-                    self.assertLessEqual(rect["top"] + rect["height"], 1448)
+                    self.assertGreaterEqual(rect["top"], bar_top)
+                    self.assertLessEqual(rect["top"] + rect["height"], screen_h)
                     self.assertGreaterEqual(rect["left"], 0)
-                    self.assertLessEqual(rect["left"] + rect["width"], 1072)
+                    self.assertLessEqual(rect["left"] + rect["width"], screen_w)
                     self.assertIn("-b", args)
                     self.assertNotIn("-c", args)
-                fill = [rect for _, rect in rectangles if rect["height"] == 10]
-                width = 25 * value // 100
+                # The tip can share a fill size; identify fill by its fixed left edge.
+                outline = rectangles[1][1]
+                fill_x = outline["left"] + (4 if scale == 3 else 3)
+                fill = [rect for _, rect in rectangles if rect["left"] == fill_x]
+                width = (25 if scale == 3 else 16) * value // 100
                 self.assertEqual([rect["width"] for rect in fill], [width] if width else [])
                 for args in texts:
-                    # Official IBM bitmap font is 8x8, scaled to 24x24.
+                    # Official IBM bitmap font is 8x8, with a dynamic dead zone.
                     self.assertEqual(args[args.index("-F") + 1], "IBM")
-                    self.assertEqual(args[args.index("-S") + 1], "3")
-                    left = int(args[args.index("-X") + 1]) + 8
+                    self.assertEqual(args[args.index("-S") + 1], str(scale))
+                    font = 8 * scale
+                    left = int(args[args.index("-X") + 1]) + (screen_w % font) // 2
                     top = int(args[args.index("-Y") + 1])
-                    self.assertGreaterEqual(top, 1412)
-                    self.assertLessEqual(top + 24, 1448)
+                    self.assertGreaterEqual(top, bar_top)
+                    self.assertLessEqual(top + font, screen_h)
                     text = args[-1]
-                    self.assertLessEqual(left + len(text) * 24, 1072 - 12)
+                    self.assertLessEqual(left + len(text) * font, screen_w - 12)
                     if text.endswith("%"):
                         self.assertEqual(len(text), 4)
-                        self.assertEqual(left, 964)
+                        self.assertEqual(left + len(text) * font, screen_w - 12)
                     else:
                         self.assertEqual(left, 12)
+                        self.assertEqual(text, f"Updated {OLD_TIME}")
+                        self.assertLessEqual(left + len(text) * font + 8, outline["left"])
                 self.assertIn("-s", shlex.split(calls[-1]))
                 self.assertNotIn("-f", shlex.split(calls[-1]))
                 self.assertNotIn("-b", shlex.split(calls[-1]))
                 self.assertIn("-w", shlex.split(calls[-1]))
+                refresh_args = shlex.split(calls[-1])
+                self.assertEqual(refresh_args[refresh_args.index("-s") + 1],
+                                 f"top={bar_top},left=0,width={screen_w},height={bar_h}")
+
+    def test_visible_info_drives_complete_image_and_status_for_each_rotation(self):
+        for width, height in ((758, 1024), (1072, 1448), (1024, 758), (1448, 1072)):
+            for rotation in range(4):
+                with self.subTest(size=(width, height), rotation=rotation):
+                    (self.work / "calls").write_text("")
+                    (self.work / "work" / "download.png").write_bytes(b"synthetic new PNG")
+                    result = self.shell(
+                        self.fixture() + f"\nFBINK_INFO={shlex.quote(self.info(width, height, rotation))}\n"
+                        + "display_refresh\n"
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    calls = self.calls()
+                    self.assertEqual(calls[1], "fbink -e -V -F IBM -S 1")
+                    self.assertIn("-g file=./work/download.png,w=-1,h=-1", calls[2])
+                    bar_h = 36 * height // 1448
+                    region = f"top={height - bar_h},left=0,width={width},height={bar_h}"
+                    self.assertTrue(any(f"-k {region}" in call for call in calls))
+                    self.assertTrue(calls[-1].endswith(f"-s {region}"))
+                    self.assertEqual(sum(" -e " in call for call in calls), 1)
+                    self.assertFalse(any("virtual_size" in call for call in calls))
+                    self.assertEqual((self.work / "dashboard.png").read_bytes(), b"synthetic new PNG")
+
+    def test_eval_parser_is_quote_aware_and_never_executes_assignments(self):
+        info = self.info(758, 1024, 3) + """ignored='quoted;screenWidth=1;$(touch sentinel)';other="$(touch sentinel)";"""
+        result = self.shell(
+            self.fixture() + f"\nFBINK_INFO={shlex.quote(info)}\n"
+            + 'calendar_display_info || exit $?\nprintf "%s %s %s\\n" "$display_width" "$display_height" "$display_rotation"\n'
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "758 1024 3\n")
+        self.assertFalse((self.work / "sentinel").exists())
+        self.assertEqual(self.calls(), ["fbink -e -V -F IBM -S 1"])
+
+    def test_invalid_or_missing_eval_info_refuses_before_any_drawing(self):
+        base = self.info()
+        cases = (
+            "", base.replace("screenWidth=1072;", ""),
+            base + "screenWidth=758;",
+            base.replace("screenWidth=1072", "screenWidth=$(touch sentinel)"),
+            base.replace("screenWidth=1072", "screenWidth=-1"),
+            base.replace("screenWidth=1072", "screenWidth=8193"),
+            base.replace("screenWidth=1072", "screenWidth=01072"),
+            base.replace("viewWidth=1072", "viewWidth=758"),
+            base.replace("viewVertOffset=0", "viewVertOffset=8"),
+            base.replace("currentRota=0", "currentRota=4"),
+            base.replace("FONTW=8", "FONTW=16"),
+            base.replace("FONTH=8", "FONTH=16"),
+            base.replace("FONTSIZE_MULT=1", "FONTSIZE_MULT=2"),
+            base.replace("isKindleLegacy=0", "isKindleLegacy=1"),
+            base.replace("screenWidth", "screen_width"),
+            base + "broken='unterminated;",
+            base + "\n[FBInk] synthetic initialization warning!",
+            base + "unknown='" + "x" * 8192 + "';",
+        )
+        for info in cases:
+            with self.subTest(case=cases.index(info)):
+                (self.work / "calls").write_text("")
+                result = self.shell(
+                    self.fixture() + f"\nFBINK_INFO={shlex.quote(info)}\ndisplay_refresh\n"
+                )
+                self.assertEqual(result.returncode, 15, result.stderr)
+                self.assertEqual(self.calls(), ["fbink --help", "fbink -e -V -F IBM -S 1"])
+                self.assertIn("DISPLAY_INFO_FAILED:", self.events())
+                self.assertFalse((self.work / "sentinel").exists())
+                self.assertEqual((self.work / "dashboard.png").read_bytes(), b"synthetic original PNG")
+                self.assertEqual((self.work / "dashboard.status").read_text(), f"{OLD_HASH}\n{OLD_TIME}\n")
+                self.assertIn("stage=info original_exit=0", (self.work / "display-refresh-error.log").read_text())
+
+    def test_scaled_band_and_font_thresholds_fail_closed_before_drawing(self):
+        for width, height in ((510, 1448), (758, 723), (240, 400)):
+            (self.work / "calls").write_text("")
+            result = self.shell(
+                self.fixture() + f"\nFBINK_INFO={shlex.quote(self.info(width, height))}\ndisplay_refresh\n"
+            )
+            self.assertEqual(result.returncode, 15, result.stderr)
+            self.assertEqual(self.calls(), ["fbink --help", "fbink -e -V -F IBM -S 1"])
+            self.assertIn("DISPLAY_GEOMETRY_FAILED:", self.events())
+        for width, height, scale in ((511, 724, 2), (749, 1046, 2), (750, 1046, 3),
+                                     (1072, 1045, 2), (1072, 1046, 3), (758, 1024, 2)):
+            result = self.shell(self.fixture() + f"""
+display_width={width}
+display_height={height}
+calendar_display_layout || exit "$?"
+printf '%s %s %s\\n' "$display_scale" "$display_bar_top" "$display_bar_height"
+""")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            bar_h = 36 * height // 1448
+            self.assertEqual(result.stdout, f"{scale} {height - bar_h} {bar_h}\n")
 
     def test_invalid_battery_and_timeout_do_not_draw_or_publish(self):
         for invalid in ("", "-1", "101", "01", " 9", "9 ", "9.0", "9\n10", "secret-output", "9%"):
@@ -263,7 +392,7 @@ display_refresh
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_quiet_fbink_exit_zero_wait_warning_is_failure(self):
-        for step in (2, 11):
+        for step in (3, 12):
             with self.subTest(step=step):
                 result = self.shell(self.fixture() + f"\nWARN_AT={step}\ndisplay_refresh\n")
                 self.assertEqual(result.returncode, 15, result.stderr)
@@ -290,8 +419,8 @@ calendar_display_command refresh 5 fbink -q -w -W GC16 -s top=1412,left=0,width=
         diagnostic = (self.work / "display-refresh-error.log").read_bytes()
         self.assertLessEqual(len(diagnostic), 4096)
         self.assertIn(b"stage=refresh original_exit=255", diagnostic)
-        self.assertIn(b"argv=-q -w -W GC16 -s top=1412,left=0,width=1072,height=36", diagnostic)
-        self.assertIn(output.encode()[-3500:], diagnostic)
+        self.assertIn(b"argv=fbink -q -w -W GC16 -s top=1412,left=0,width=1072,height=36", diagnostic)
+        self.assertIn(output.encode()[-3000:], diagnostic)
         self.assertIn(b"virtual_size=unavailable", diagnostic)
         self.assertEqual(len(self.calls()), 1)
         self.assertNotIn("synthetic ioctl detail", self.events())
@@ -544,7 +673,7 @@ display_cache CACHE_DISPLAY
             self.fixture() + "\ncalendar_display_ready() { return 32; }\ndisplay_refresh\n"
         )
         self.assertEqual(result.returncode, 32)
-        self.assertTrue(all("--help" in call for call in self.calls()))
+        self.assertTrue(all("--help" in call or " -e " in call for call in self.calls()))
 
     def test_display_library_packaging_and_recovery_independence(self):
         self.assertIn('. "$CONFIG_DIR/calendar-display.sh"', WORKER)

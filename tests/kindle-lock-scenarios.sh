@@ -34,6 +34,10 @@ install_fixture() {
     cp "$FIXTURE/config.sh" "$DIR/calendar-config.sh"
     cp "$FIXTURE/lock.sh" "$DIR/calendar-lock.sh"
     printf '%s\n' 'IMAGE_URL=https://calendar.invalid/image.png' 'WIFI_SSID=fixture-network' > "$DIR/config.local.conf"
+    if [ "${configuration:-static}" = dynamic ]; then
+        printf '%s\n' 'IMAGE_MODE=dynamic' >> "$DIR/config.local.conf"
+        printf '%s\n' 'BEARER_TOKEN=synthetic-not-sent' > "$DIR/image-auth.local.conf"
+    fi
 }
 start_busy() {
     breadcrumb 'contending-start-check-begin'
@@ -289,6 +293,7 @@ exec 7>>"$CALENDAR_RESOURCE_LOCK"
 resource_inode=$(readlink "/proc/$$/fd/7")
 wait "$cleanup_pid"
 [ ! -d "$CASE/workspace" ] || fail 'worker cleanup did not remove owned workspace'
+[ ! -d "$CASE/auth-workspace" ] || fail 'worker cleanup did not remove private request workspace'
 [ "$(readlink "/proc/$$/fd/7")" = "$resource_inode" ] || fail 'worker cleanup removed resource inode'
 expect 32 probe
 expect 32 /bin/sh "$FIXTURE/actor.sh" resource-probe > "$CASE/resource-busy.log" 2>&1
@@ -333,9 +338,10 @@ expect 1 dedicated_owner_alive
 . "$FIXTURE/actual.sh"
 printf 'PASS dedicated worker direct-parent authorization and inherited lock\n'
 
+for configuration in static dynamic; do
 for initial in first restored; do
     for phase in before-copy after-copy after-spawn; do
-        new_case "start-$initial-$phase"
+        new_case "start-$configuration-$initial-$phase"
         install_fixture
         if [ "$initial" = restored ]; then
             mkdir "$RUN"
@@ -363,6 +369,9 @@ for initial in first restored; do
             for copied in controller.sh refresh.sh calendar-config.sh calendar-lock.sh config.local.conf; do
                 [ -f "$RUN/$copied" ] || fail "missing packaged file $copied"
             done
+            if [ "$configuration" = dynamic ]; then
+                [ -f "$RUN/image-auth.local.conf" ] || fail 'missing runtime authentication snapshot'
+            fi
         fi
         if [ "$initial" = restored ]; then
             read -r retained < "$RUN/output.synthetic"
@@ -383,12 +392,17 @@ for initial in first restored; do
         fi
         expect 0 probe
         expect 20 /bin/sh "$FIXTURE/actor.sh" start > "$CASE/unrestored-start.log" 2>&1
+        # Recovery must not read either installed or runtime private data.
+        rm -f "$DIR/image-auth.local.conf" "$RUN/image-auth.local.conf" \
+            "$DIR/config.local.conf" "$RUN/config.local.conf"
         expect 0 recover
         [ -f "$RUN/restored" ] && [ -f "$CASE/ui-call" ] ||
             fail 'actual recovery entry did not recover interrupted startup'
-        printf 'PASS %s start concurrency and launcher SIGKILL %s\n' "$initial" "$phase"
+        printf 'PASS %s %s start concurrency and launcher SIGKILL %s\n' "$configuration" "$initial" "$phase"
     done
 done
+done
+configuration=static
 
 new_case preflight-busy
 install_fixture

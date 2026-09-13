@@ -23,12 +23,14 @@ esac
     { printf 'CONFIG_ERROR: calendar-config.sh is missing or unsafe.\n' >&2; exit 10; }
 . "$CONFIG_DIR/calendar-config.sh"
 calendar_load_config "$CONFIG_DIR/config.local.conf" || exit 10
+calendar_validate_auth "$CONFIG_DIR/image-auth.local.conf" || exit 10
 [ -f "$CONFIG_DIR/calendar-lock.sh" ] && [ ! -L "$CONFIG_DIR/calendar-lock.sh" ] ||
     { printf 'LOCK_DEPENDENCY: calendar-lock.sh is missing or unsafe.\n' >&2; exit 10; }
 . "$CONFIG_DIR/calendar-lock.sh"
 calendar_lock_require || exit "$?"
 URL=$IMAGE_URL
 WORK=
+AUTH_WORK=
 child_pid=
 child_start=
 launch_guard=0
@@ -327,6 +329,45 @@ connection_ready() {
     log "WIFI_READY: cmState=CONNECTED carrier=1 ipv4=$ipv4 default_route=1"
 }
 
+prepare_dynamic_request() {
+    [ "$IMAGE_MODE" = dynamic ] || return 0
+    # /mnt/us may be FAT: keep bearer material on the private /tmp filesystem,
+    # while download.png remains next to the cache for atomic replacement.
+    launch_guard=1
+    AUTH_WORK=$(mktemp -d /tmp/calendar-image-auth.XXXXXX) || {
+        honor_signal
+        log 'AUTH_CONFIG_ERROR: private request workspace unavailable.'
+        return 14
+    }
+    honor_signal
+    if bounded 3 /bin/sh -c '. "$1"; calendar_write_request "$2" "$3" "$4" "$5" "$6"' \
+        sh "$CONFIG_DIR/calendar-config.sh" "$CONFIG_DIR/config.local.conf" \
+        "$CONFIG_DIR/image-auth.local.conf" "$AUTH_WORK/request.conf" "$battery" "$charging"; then
+        return 0
+    fi
+    log 'AUTH_CONFIG_ERROR: request preparation failed; no network request made.'
+    return 10
+}
+
+download_image() {
+    # -q MUST be first: do not inherit an insecure ~/.curlrc.
+    if [ "$IMAGE_MODE" = dynamic ]; then
+        bounded "$attempt_limit" curl -q --globoff --fail --max-redirs 0 \
+            --silent --show-error --proto '=https' --proto-redir '=https' \
+            --connect-timeout 5 --max-time "$attempt_limit" --retry 0 \
+            --max-filesize 5242880 --stderr "$AUTH_WORK/curl.err" \
+            --request POST --header 'Content-Type: application/json' --header 'Expect:' \
+            --config "$AUTH_WORK/request.conf" \
+            --output "$WORK/download.png" --write-out '%{http_code}\n%{content_type}\n'
+    else
+        bounded "$attempt_limit" curl -q --globoff --fail --location --max-redirs 5 \
+            --silent --show-error --proto '=https' --proto-redir '=https' \
+            --connect-timeout 5 --max-time "$attempt_limit" --retry 0 \
+            --max-filesize 5242880 --stderr "$WORK/curl.err" \
+            --output "$WORK/download.png" --write-out '%{http_code}\n%{content_type}\n' "$URL"
+    fi
+}
+
 restore_one() {
     if bounded 4 lipc-set-prop -i "$1" "$2" "$3"; then
         log "WIFI_RESTORE_SET: $1 $2=$3"
@@ -358,6 +399,12 @@ cleanup() {
     trap - 0
     trap '' HUP INT TERM
     cancel_child
+    if [ -n "${AUTH_WORK:-}" ]; then
+        if ! rm -f "$AUTH_WORK/request.conf" "$AUTH_WORK/curl.err" || ! rmdir "$AUTH_WORK"; then
+            report 'CLEANUP_FAILED: private request workspace.'
+            case "$final_status" in 129|130|143|20) ;; *) final_status=14 ;; esac
+        fi
+    fi
     restore_failed=0
     if [ "$radio_owned" = 1 ] || [ "$wifi_owned" = 1 ]; then
         if monotime; then
@@ -495,6 +542,8 @@ if [ "$battery" -le 20 ] && [ "$charging" = 0 ]; then
 fi
 check_sleep
 
+prepare_dynamic_request || exit "$?"
+
 if bounded 3 lipc-get-prop -i com.lab126.cmd wirelessEnable; then
     old_radio=$(cat "$WORK/output") || exit 14
 else
@@ -588,12 +637,7 @@ while [ "$attempt" -lt 60 ]; do
     attempt_limit=$remaining
     [ "$attempt_limit" -le 15 ] || attempt_limit=15
     : > "$WORK/curl.err" || { log 'IO_FAILED: cannot prepare curl error output.'; exit 14; }
-    # -q MUST be first: do not inherit an insecure ~/.curlrc.
-    if bounded "$attempt_limit" curl -q --globoff --fail --location --max-redirs 5 \
-        --silent --show-error --proto '=https' --proto-redir '=https' \
-        --connect-timeout 5 --max-time "$attempt_limit" --retry 0 \
-        --max-filesize 5242880 --stderr "$WORK/curl.err" \
-        --output "$WORK/download.png" --write-out '%{http_code}\n%{content_type}\n' "$URL"; then
+    if download_image; then
         downloaded=1
         break
     else
@@ -612,7 +656,7 @@ done
 [ "$downloaded" = 1 ] || { log 'NETWORK_FAILED: retry count exhausted.'; exit 12; }
 http=$(awk 'NR == 1 { print }' "$WORK/output") || exit 14
 type=$(awk 'NR == 2 { sub(/;.*/, ""); print }' "$WORK/output") || exit 14
-log "HTTP: status=$http type=$type attempts=$attempt"
+log "HTTP: status=$http attempts=$attempt; validating response type."
 [ "$http" = 200 ] || { log 'NETWORK_FAILED: final HTTP status is not 200.'; exit 12; }
 [ "$type" = image/png ] && [ -s "$WORK/download.png" ] ||
     { log 'PNG_FAILED: expected a nonempty image/png response.'; exit 13; }

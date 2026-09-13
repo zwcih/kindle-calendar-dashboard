@@ -98,6 +98,10 @@ case "$action" in
         child_pid= child_start= pending_signal=0 radio_owned=0 wifi_owned=0 log_failed=0
         WORK=$CASE/workspace
         mkdir "$WORK" || exit 1
+        AUTH_WORK=$CASE/auth-workspace
+        mkdir "$AUTH_WORK" || exit 1
+        : > "$AUTH_WORK/request.conf"
+        : > "$AUTH_WORK/curl.err"
         # Model a completed command that left a descendant, not a tracked direct child.
         /bin/sh "$FIXTURE/actor.sh" inherited-child &
         wait_file "$CASE/descendant.ready"

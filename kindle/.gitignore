@@ -3,6 +3,10 @@ config*.conf
 !config.example.conf
 wifi-ssid.conf
 *.local.*
+image-auth*.conf
+!image-auth.example.conf
+request.conf
+calendar-image-auth.*/
 .env*
 
 # Images, logs, captures and same-filesystem worker temporary files.

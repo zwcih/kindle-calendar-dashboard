@@ -20,7 +20,9 @@ URL = "https:" + "//calendar.invalid/image.png?a=1&b=%20&literal=$(touch%20senti
 
 
 def function(source, name):
-    match = re.search(rf"^{name}\(\) \{{\n.*?^\}}", source, re.M | re.S)
+    match = re.search(rf"^{name}\(\) \{{[^\n]*\}}$", source, re.M)
+    if not match:
+        match = re.search(rf"^{name}\(\) \{{\n.*?^\}}", source, re.M | re.S)
     if not match:
         raise AssertionError(f"Missing shell function: {name}")
     return match.group()
@@ -49,6 +51,12 @@ class KindleShellTests(unittest.TestCase):
             + '\ncalendar_load_config config.local.conf || exit $?\n'
             + 'printf "%s\\n%s\\n" "$IMAGE_URL" "$WIFI_SSID"\n'
         )
+
+    def test_function_extraction_single_and_multiline(self):
+        self.assertEqual(function(WORKER, "report"), 'report() { printf \'%s\\n\' "$*" >&2; }')
+        self.assertTrue(function(WORKER, "download_image").endswith("\n}"))
+        with self.assertRaises(AssertionError):
+            function(WORKER, "missing_fixture_function")
 
     def test_shell_syntax_and_encoding(self):
         scripts = [*(ROOT / "kindle").rglob("*.sh"), *(ROOT / "tests").glob("kindle-*.sh")]

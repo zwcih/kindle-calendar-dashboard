@@ -515,6 +515,7 @@ case "${1-}" in
             { printf 'CONFIG_ERROR: calendar-config.sh is missing or unsafe.\n' >&2; exit 10; }
         . "$CONFIG_DIR/calendar-config.sh"
         calendar_load_config "$CONFIG_DIR/config.local.conf" || exit 10
+        calendar_validate_auth "$CONFIG_DIR/image-auth.local.conf" || exit 10
         ;;
 esac
 
@@ -535,7 +536,8 @@ case "${1-}" in
             # Only this controller's fixed runtime files are removed.
             for file in controller.sh refresh.sh owner guard guard-ready restored old-light old-sleep console.log child \
                 deadline touch touch-child touch-ready touch-required touch-event touch.err stop-requested stopping \
-                gesture-held manual-refresh touch-decoded calendar-config.sh config.local.conf calendar-lock.sh; do
+                gesture-held manual-refresh touch-decoded calendar-config.sh config.local.conf calendar-lock.sh \
+                image-auth.local.conf; do
                 rm -f "$RUN/$file" || exit 14
             done
             # Per-process command captures are retained in the existing runtime directory.
@@ -549,6 +551,11 @@ case "${1-}" in
             cp "$DIR/calendar-lock.sh" "$RUN/calendar-lock.sh" &&
             cp "$DIR/config.local.conf" "$RUN/config.local.conf" || exit 14
         calendar_load_config "$RUN/config.local.conf" || exit 10
+        if [ "$IMAGE_MODE" = dynamic ]; then
+            : > "$RUN/image-auth.local.conf" &&
+                cp "$DIR/image-auth.local.conf" "$RUN/image-auth.local.conf" || exit 14
+        fi
+        calendar_validate_auth "$RUN/image-auth.local.conf" || exit 10
         # FD 9 crosses nohup/setsid/exec and remains held by the controller,
         # guardian and their descendants, including every publication gap.
         nohup setsid /bin/sh "$RUN/controller.sh" --run </dev/null > "$RUN/console.log" 2>&1 &

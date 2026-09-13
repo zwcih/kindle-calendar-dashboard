@@ -64,6 +64,7 @@ monotime() {{ mono=100; }}
 calendar_display_clock() {{ display_now=100; }}
 window_gate() {{ return 0; }}
 calendar_display_ready() {{ printf 'authorized\\n' >> events; }}
+calendar_display_geometry() {{ printf 'virtual_size=unavailable\\nrotate=unavailable\\nbits_per_pixel=unavailable\\n'; }}
 date() {{ printf 'sampled\\n' >> clock.calls; printf '%s\\n' '{NEW_TIME}'; }}
 calendar_display_run() {{
     printf '%s\\n' "$1" >> limits
@@ -270,6 +271,121 @@ display_refresh
                 self.assertNotIn("update 42", self.events())
                 self.assertEqual((self.work / "dashboard.png").read_bytes(), b"synthetic original PNG")
                 self.assertEqual((self.work / "dashboard.status").read_text(), f"{OLD_HASH}\n{OLD_TIME}\n")
+
+    def failing_refresh(self, extra="", output="synthetic ioctl detail"):
+        return self.shell(self.fixture() + f"""
+calendar_display_run() {{
+    printf '%s\\n' "$*" >> calls
+    printf '%s' {shlex.quote(output)} > "$CALENDAR_DISPLAY_OUTPUT"
+    return 255
+}}
+{extra}
+calendar_display_command refresh 5 fbink -q -w -W GC16 -s top=1412,left=0,width=1072,height=36
+""")
+
+    def test_refresh_255_preserves_bounded_private_output_without_retry(self):
+        output = "x" * 6000 + "\nsynthetic ioctl detail\n"
+        result = self.failing_refresh(output=output)
+        self.assertEqual(result.returncode, 15, result.stderr)
+        diagnostic = (self.work / "display-refresh-error.log").read_bytes()
+        self.assertLessEqual(len(diagnostic), 4096)
+        self.assertIn(b"stage=refresh original_exit=255", diagnostic)
+        self.assertIn(b"argv=-q -w -W GC16 -s top=1412,left=0,width=1072,height=36", diagnostic)
+        self.assertIn(output.encode()[-3500:], diagnostic)
+        self.assertIn(b"virtual_size=unavailable", diagnostic)
+        self.assertEqual(len(self.calls()), 1)
+        self.assertNotIn("synthetic ioctl detail", self.events())
+        self.assertIn("DISPLAY_DIAGNOSTIC_SAVED:", self.events())
+        self.assertFalse(list(self.work.glob(".display-refresh-error.*")))
+        self.assertEqual((self.work / "dashboard.png").read_bytes(), b"synthetic original PNG")
+        self.assertEqual((self.work / "dashboard.status").read_text(), f"{OLD_HASH}\n{OLD_TIME}\n")
+        result = self.failing_refresh(output="")
+        self.assertEqual(result.returncode, 15, result.stderr)
+        self.assertIn("original_exit=255", (self.work / "display-refresh-error.log").read_text())
+
+    def test_diagnostic_io_failure_keeps_original_recovery_status(self):
+        path = self.work / "display-refresh-error.log"
+        path.write_text("prior diagnostic")
+        result = self.failing_refresh("""
+mv() {
+    [ "$3" != "./display-refresh-error.log" ] || return 1
+    command mv "$@"
+}
+""")
+        self.assertEqual(result.returncode, 15, result.stderr)
+        self.assertEqual(path.read_text(), "prior diagnostic")
+        self.assertIn("DISPLAY_FAILED: stage=refresh exit=255", self.events())
+        self.assertIn("DISPLAY_DIAGNOSTIC_FAILED:", self.events())
+        self.assertFalse(list(self.work.glob(".display-refresh-error.*")))
+        path.unlink()
+        path.mkdir()
+        result = self.failing_refresh()
+        self.assertEqual(result.returncode, 15, result.stderr)
+        self.assertTrue(path.is_dir())
+        self.assertFalse(list(self.work.glob(".display-refresh-error.*")))
+
+    def test_success_unchanged_and_cancellation_do_not_collect_diagnostics(self):
+        source = self.fixture() + """
+calendar_display_geometry() { exit 91; }
+new_hash=$old_hash
+display_refresh || exit "$?"
+calendar_display_command refresh 5 fbink -q -w -W GC16 -s top=1412,left=0,width=1072,height=36
+"""
+        result = self.shell(source)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.work / "display-refresh-error.log").exists())
+        self.assertEqual(len(self.calls()), 1)
+        for code in (16, 32, 129, 130, 143):
+            result = self.shell(self.fixture() + f"""
+calendar_display_geometry() {{ exit 91; }}
+calendar_display_run() {{ return {code}; }}
+calendar_display_command refresh 5 fbink
+""")
+            self.assertEqual(result.returncode, code, result.stderr)
+            self.assertFalse((self.work / "display-refresh-error.log").exists())
+
+    def test_geometry_diagnostic_fixed_paths_bounded_values_and_deadline(self):
+        geometry = function(DISPLAY, "calendar_display_geometry")
+        for name in ("virtual_size", "rotate", "bits_per_pixel"):
+            self.assertIn(f"/sys/class/graphics/fb0/{name}", geometry)
+        # Relocate only the three fixed sysfs paths into a synthetic directory.
+        geometry = geometry.replace("/sys/class/graphics/fb0/", "./synthetic-fb0/")
+        directory = self.work / "synthetic-fb0"
+        directory.mkdir()
+        (directory / "virtual_size").write_text("1448,1072\nignored second line\n")
+        (directory / "rotate").write_text("3\n")
+        (directory / "bits_per_pixel").write_text("8\n")
+        source = self.fixture() + "\n" + geometry + """
+calendar_display_run() {
+    printf '%s\\n' "$*" >> calls
+    [ "$1" = 1 ] || exit 91
+    shift
+    "$@" > "$CALENDAR_DISPLAY_OUTPUT"
+}
+"""
+        result = self.shell(source + "\ncalendar_display_geometry\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "virtual_size=1448,1072\nrotate=3\nbits_per_pixel=8\n")
+        (directory / "virtual_size").write_text("1" * 33 + ",2\n")
+        (directory / "rotate").write_text("not-numeric\n")
+        (directory / "bits_per_pixel").unlink()
+        result = self.shell(source + "\ncalendar_display_geometry\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        unavailable = "virtual_size=unavailable\nrotate=unavailable\nbits_per_pixel=unavailable\n"
+        self.assertEqual(result.stdout, unavailable)
+        result = self.shell(source + """
+CALENDAR_DISPLAY_DEADLINE=100
+calendar_display_run() { exit 92; }
+calendar_display_geometry
+""")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, unavailable)
+        result = self.shell(source + """
+calendar_display_run() { return 124; }
+calendar_display_geometry
+""")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, unavailable)
 
     def test_signal_and_guard_codes_stop_overlay(self):
         for code in (16, 32, 129, 130, 143):

@@ -32,6 +32,8 @@ def forbidden_path(path):
     if any(x in {'.local', 'output', '__pycache__', 'backups', 'cache', 'runtime'} for x in p.parts):
         return True
     n = p.name.lower()
+    if n.startswith('.display-refresh-error.'):
+        return True
     if n.startswith('.env') and n != '.env.example':
         return True
     if n == 'config.local.json' or '.local.' in n or n in {'wifi-ssid.conf', 'github-pat', 'id_rsa', 'id_ed25519', 'dashboard.status'}:

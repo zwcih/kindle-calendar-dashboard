@@ -16,6 +16,52 @@ calendar_display_begin() {
     CALENDAR_DISPLAY_DEADLINE=$((display_now + 30))
 }
 
+calendar_display_geometry() {
+    for display_attribute in /sys/class/graphics/fb0/virtual_size \
+        /sys/class/graphics/fb0/rotate /sys/class/graphics/fb0/bits_per_pixel; do
+        display_field=${display_attribute##*/}
+        display_value=unavailable
+        if [ -f "$display_attribute" ] && [ -r "$display_attribute" ] &&
+            calendar_display_clock && [ "$display_now" -lt "$CALENDAR_DISPLAY_DEADLINE" ]; then
+            # Optional diagnostics share the original deadline, never a new budget.
+            if calendar_display_run 1 awk -v field="$display_field" '
+                NR == 1 && length($0) <= 32 &&
+                    ((field == "virtual_size" && /^[0-9]+,[0-9]+$/) ||
+                     (field != "virtual_size" && /^[0-9]+$/)) { print; valid=1; exit }
+                { exit }
+                END { exit !valid }
+            ' "$display_attribute"; then
+                display_value=$(cat "$CALENDAR_DISPLAY_OUTPUT") || display_value=unavailable
+            fi
+        fi
+        printf '%s=%s\n' "$display_field" "$display_value" || return 14
+    done
+}
+
+calendar_display_save_failure() {
+    display_error_file=$DIR/display-refresh-error.log
+    if [ -L "$display_error_file" ] ||
+        { [ -e "$display_error_file" ] && [ ! -f "$display_error_file" ]; }; then
+        log 'DISPLAY_DIAGNOSTIC_FAILED: unsafe private diagnostic target; not touched.'
+        return 14
+    fi
+    display_error_tmp=$(mktemp "$DIR/.display-refresh-error.XXXXXX") || {
+        log 'DISPLAY_DIAGNOSTIC_FAILED: cannot stage private diagnostic.'
+        return 14
+    }
+    if ! printf 'stage=refresh original_exit=%s recorder_pid=%s\nargv=-q -w -W GC16 -s top=1412,left=0,width=1072,height=36\n--- last 3500 output bytes ---\n' \
+        "$1" "$$" > "$display_error_tmp" ||
+        ! tail -c 3500 "$CALENDAR_DISPLAY_OUTPUT" >> "$display_error_tmp" ||
+        ! printf '\n--- optional framebuffer attributes ---\n' >> "$display_error_tmp" ||
+        ! calendar_display_geometry >> "$display_error_tmp" ||
+        ! mv -f "$display_error_tmp" "$display_error_file"; then
+        rm -f "$display_error_tmp"
+        log 'DISPLAY_DIAGNOSTIC_FAILED: private diagnostic could not be published.'
+        return 14
+    fi
+    log 'DISPLAY_DIAGNOSTIC_SAVED: private display-refresh-error.log retained; do not publish raw output.' || return 14
+}
+
 calendar_display_command() {
     display_stage=$1
     shift
@@ -37,6 +83,9 @@ calendar_display_command() {
         if [ "$1" = "${FBINK-}" ] && [ "$display_stage" != capabilities ] &&
             [ -s "$CALENDAR_DISPLAY_OUTPUT" ]; then
             log "DISPLAY_FAILED: stage=$display_stage diagnostic output despite exit=0; output withheld." || return 14
+            if [ "$display_stage" = refresh ] && ! calendar_display_save_failure 0; then
+                log 'DISPLAY_DIAGNOSTIC_FAILED: original display failure retained; normal recovery still required.'
+            fi
             return 15
         fi
         return 0
@@ -46,8 +95,11 @@ calendar_display_command() {
     log "DISPLAY_FAILED: stage=$display_stage exit=$display_rc; command output withheld." || return 14
     case "$display_rc" in
         16|32|129|130|143) return "$display_rc" ;;
-        *) return 15 ;;
     esac
+    if [ "$display_stage" = refresh ] && ! calendar_display_save_failure "$display_rc"; then
+        log 'DISPLAY_DIAGNOSTIC_FAILED: original display failure retained; normal recovery still required.'
+    fi
+    return 15
 }
 
 calendar_status_valid_time() {

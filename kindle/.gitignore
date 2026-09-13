@@ -14,6 +14,7 @@ wifi-ssid.conf
 .calendar-*/
 .calendar-auto-refresh.*/
 .dedicated-log.*
+.display-refresh-error.*
 *.bak
 *.backup
 *~

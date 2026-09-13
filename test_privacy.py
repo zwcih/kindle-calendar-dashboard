@@ -10,7 +10,9 @@ class PrivacyTests(unittest.TestCase):
     def test_private_paths(self):
         for path in ('.local/task.py', 'output/image.png', 'config.local.json', '.env',
                      'calendar.ics', 'key.pem', 'backups/a.txt', 'kindle/config.conf',
-                     'kindle/kindle-dashboard/dashboard.status'):
+                     'kindle/kindle-dashboard/dashboard.status',
+                     'kindle/kindle-dashboard/display-refresh-error.log',
+                     'kindle/kindle-dashboard/.display-refresh-error.synthetic'):
             with self.subTest(path=path):
                 self.assertTrue(self.check('', path))
 

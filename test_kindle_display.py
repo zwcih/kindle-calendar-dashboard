@@ -73,14 +73,14 @@ calendar_display_run() {{
     printf '%s\\n' "$@" > "$WORK/args.$CALLS"
     [ "$CALLS" != "$FAIL_AT" ] || return "$FAIL_RC"
     case "$1" in
-        lipc-get-prop) printf '%s\\n' "$BATTERY" > "$WORK/output" ;;
+        lipc-get-prop) printf '%s\\n' "$BATTERY" > "$CALENDAR_DISPLAY_OUTPUT" ;;
         fbink)
             if [ "$2" = --help ]; then
-                printf '%s\\n' "$FBINK_HELP" > "$WORK/output"
+                printf '%s\\n' "$FBINK_HELP" > "$CALENDAR_DISPLAY_OUTPUT"
             elif [ "$CALLS" = "$WARN_AT" ]; then
-                printf '[FBInk] Failed to wait for completion of update 42!\\n' > "$WORK/output"
+                printf '[FBInk] Failed to wait for completion of update 42!\\n' > "$CALENDAR_DISPLAY_OUTPUT"
             else
-                : > "$WORK/output"
+                : > "$CALENDAR_DISPLAY_OUTPUT"
             fi
             ;;
         *) printf 'UNEXPECTED_HARDWARE_COMMAND\\n' >&2; return 99 ;;
@@ -299,6 +299,24 @@ display_refresh
         self.assertIn("shared 30s", self.events())
         self.assertEqual((self.work / "dashboard.png").read_bytes(), b"synthetic original PNG")
         self.assertEqual((self.work / "dashboard.status").read_text(), f"{OLD_HASH}\n{OLD_TIME}\n")
+
+    def test_actual_cache_power_gate_also_uses_remaining_display_budget(self):
+        result = self.shell(
+            self.fixture() + "\n" + function(CONTROLLER, "calendar_display_ready") + """
+record() { log "$@"; }
+clock_now=129
+calendar_display_clock() { display_now=$clock_now; }
+calendar_display_run() {
+    printf '%s\\n' "$*" >> calls
+    clock_now=$((clock_now + $1))
+    printf '1\\n' > "$CALENDAR_DISPLAY_OUTPUT"
+}
+calendar_display_ready
+"""
+        )
+        self.assertEqual(result.returncode, 15, result.stderr)
+        self.assertEqual(self.calls(), ["1 lipc-get-prop -i com.lab126.powerd preventScreenSaver"])
+        self.assertIn("shared 30s", self.events())
 
     def test_unknown_missing_malformed_or_mismatched_timestamp(self):
         cases = (None, "", f"{NEW_HASH}\n{OLD_TIME}\n", f"{OLD_HASH}\n2026-02-30 08:30\n",

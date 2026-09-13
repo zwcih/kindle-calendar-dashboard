@@ -157,11 +157,16 @@ calendar_display_run() {
     run "$@"
 }
 calendar_display_ready() {
-    property -i com.lab126.powerd preventScreenSaver && [ "$value" = 1 ] &&
-        property com.lab126.powerd state && [ "$value" = active ] || {
-        record 'CANCEL: cache display requires active power state and owned sleep inhibition.'
-        return 32
-    }
+    calendar_display_command sleep-state 4 lipc-get-prop -i com.lab126.powerd preventScreenSaver || return "$?"
+    value=$(cat "$CALENDAR_DISPLAY_OUTPUT") ||
+        { record 'DISPLAY_FAILED: sleep inhibition result unreadable.'; return 14; }
+    [ "$value" = 1 ] ||
+        { record 'CANCEL: cache display requires owned sleep inhibition.'; return 32; }
+    calendar_display_command power-state 4 lipc-get-prop com.lab126.powerd state || return "$?"
+    value=$(cat "$CALENDAR_DISPLAY_OUTPUT") ||
+        { record 'DISPLAY_FAILED: power state result unreadable.'; return 14; }
+    [ "$value" = active ] ||
+        { record 'CANCEL: cache display requires active power state.'; return 32; }
 }
 display_cache() {
     cache_label=$1

@@ -1,8 +1,48 @@
 # Kindle Calendar Dashboard
 
-将 CalDAV 日历和 Open-Meteo 天气预报渲染为适合 Kindle Paperwhite 3 的 `1072×1448` 三阶灰度 PNG。
+包含**服务端图片生成器**与 **Kindle 客户端**：服务端将 CalDAV 日历和 Open-Meteo 天气预报渲染为适合 Kindle Paperwhite 3 的 `1072×1448` 三阶灰度 PNG，并可上传到 WebDAV；客户端下载图片、通过 FBInk 显示，在专用模式中定时刷新并进入真实内核休眠。两侧独立运行、配置分离，Kindle 不需要 Python。
 
-## 特性
+| 部分 | 源码 | 职责 |
+| --- | --- | --- |
+| 服务端 | `dashboard.py`、`update_no_model.py` | 获取日历和天气、生成图片、可选 WebDAV 上传；由用户安排服务端调度 |
+| 客户端 | `kindle/kindle-dashboard/`、`kindle/documents/` | 手动刷新、UTC+8 06:30–22:00 半小时刷新、真实休眠、触摸退出与界面恢复 |
+
+已有可用图片地址时，可直接按下方客户端快速开始部署；需要自行生成图片则继续阅读[服务端安装](#服务端安装)。
+
+## Kindle 客户端快速开始
+
+需要已安装、可从书库执行 shell 入口的 **libkh**、`/mnt/us/libkh/bin/fbink`、支持严格 HTTPS/TLS 的 `curl`、有效 CA/系统时间，以及设备已有的 LIPC、Upstart、Linux `/proc` 与 `flock -n FD`。目标设备的 BusyBox ash 已实测支持锁竞争、跨 `nohup setsid /bin/sh` 继承，以及父进程被强杀后子进程继续持锁；缺少所需能力会明确拒绝，不自动安装依赖或提供不安全回退。
+
+专用模式只针对已核验的 PW3 接口：`max77696-rtc.0` 相对 RTC 闹钟、`/sys/power/state`、含休眠计数的 `/proc/uptime`、`lab126_gui` 及 ARM32 `cyttsp4_mt` 触屏。**不保证所有 PW3 或固件兼容**，也不包含越狱、固件升级或开机钩子。
+
+1. 确保服务端已生成并上传图片，取得可直接下载 PNG 的 HTTPS 地址；上传地址和客户端读取地址不一定相同。客户端不接收服务端 CalDAV/WebDAV 密码。
+2. 将 [`kindle/kindle-dashboard/config.example.conf`](kindle/kindle-dashboard/config.example.conf) 复制为同目录的 `config.local.conf`，仅在本地填入 `IMAGE_URL` 和 Kindle 已保存网络的 `WIFI_SSID`。配置是字面 `KEY=value` 数据：不加引号、不写 `export`、不执行 shell 展开，不存 Wi-Fi 密码。使用 UTF-8 无 BOM、LF；这个私有文件已被 Git 忽略，空白模板不能直接运行。
+3. 将仓库 `kindle/` 内两个目录的内容分别合并到 **Kindle USB 根目录**的同名目录，不能把外层 `kindle` 套进去。最终应为：
+
+```text
+documents/
+  calendar-manual-refresh.sh
+  calendar-dedicated-start.sh
+  calendar-dedicated-recover.sh
+kindle-dashboard/
+  calendar-dedicated.sh
+  calendar-auto-refresh.sh
+  calendar-config.sh
+  calendar-lock.sh
+  config.example.conf
+  config.local.conf              # 本地私有配置，不在仓库中
+```
+
+4. 安全弹出 USB，保持 Kindle 唤醒并连接已保存的 Wi-Fi，从书库打开“手动刷新日程”。首次成功后才会建立 `kindle-dashboard/dashboard.png` 缓存。
+5. 缓存已建立后打开“启用日程专用模式（半小时）”。它停止 GUI、关闭前光，按 **UTC+8 06:30–22:00 每半小时**刷新；其间真实休眠，夜间等待次日 06:30。
+
+使用时：**电源键唤醒 → 单指短按松开刷新 → 单指按住至少 2 秒再松开退出**；也可从书库运行“退出日程专用模式”。退出恢复 GUI、Home、原前光和原生睡眠。多指期间不识别新单指手势，直到所有触点释放。电量未知或不超过 20% 且未充电时不联网；手动请求只跳过安静时段，不跳过电量与所有权检查。
+
+**从旧版升级**：先用旧入口正常退出并确认恢复，再正常重启 Kindle（不是恢复出厂设置或固件升级），之后连接 USB 更新全部四个运行脚本／库及三个书库入口，保留有效私有配置，安全弹出后再使用。不要混用旧运行快照，也不要另留一套旧命名入口来启动旧版本。不要手工删除旧 `.lock` 目录或新版 `.flock` 文件来“解锁”；启动者、worker 与存活子进程的互斥由内核锁管理。
+
+当前版本已实测独立手动下载／显示／缓存、专用模式启动与再次启动、真实休眠、单指刷新和长按退出的完整恢复；独立并发、严格 SIGKILL 与恢复套件已在 Linux `/bin/sh=dash` 全部通过。**完整崩溃套件未在 Kindle 上跑完，物理多指序列、新版半小时自动时隙及整夜运行仍未验证**。详见[客户端依赖、配置与排障](kindle/README.md)。
+
+## 服务端特性
 
 - 今天的未完成日程优先；今天结束后自动整屏切换到明天
 - 今天仅剩 1–2 项时，利用空余区域补充明天的日程
@@ -19,12 +59,15 @@
 update_no_model.py (standalone, no model/agent runtime)
   ├─ Open-Meteo → validate two local dates/numbers → atomic weather cache
   │                 failure → valid same-date cache or no weather
-  └─ dashboard.py functions: CalDAV → local grayscale PNG → optional WebDAV PUT → Kindle
+  └─ dashboard.py functions: CalDAV → local grayscale PNG → optional WebDAV PUT
+                                                           ↓ HTTPS PNG
+Kindle: calendar-auto-refresh.sh → validate PNG → FBInk → atomic local cache
+        calendar-dedicated.sh → half-hour schedule / real suspend / UI recovery
 ```
 
 更新器只依赖 Python 标准库和已有 `dashboard.py`（使用 Pillow），不需要 OpenClaw、模型 API、聊天会话或模型凭据。
 
-## 安装
+## 服务端安装
 
 需要 Python 3.11+、Pillow、IANA 时区数据库和支持中文的 Noto Sans CJK 字体。
 
@@ -185,7 +228,7 @@ WantedBy=timers.target
 
 systemd 的环境文件应使用 `NAME=value` 赋值，不写 `export`，也不依赖 shell 命令或变量展开；它与上面的 shell source 语义不同。由用户将模板放到自己的 systemd 用户单元目录、审阅后启用，例如 `systemctl --user enable --now kindle-dashboard.timer`。同一 service 活跃期间不会再次启动，但独立手动/cron 进程仍需自行互斥。默认 systemd 将退出码 `3` 标记为失败，便于发现天气退化；如果只需记录日志而不告警，可在 `[Service]` 显式增加 `SuccessExitStatus=3`。无人登录时是否运行取决于用户服务/linger 的宿主机配置。
 
-建议使用只具备目标日历读取和目标上传目录权限的独立账号、Nextcloud 应用密码，并保护配置和日志。Kindle 越狱后可定时下载 WebDAV 文件或其只读分享链接，再使用 `eips` 刷新屏幕；不要将私人日程分享链接写进公开仓库。
+建议使用只具备目标日历读取和目标上传目录权限的独立账号、Nextcloud 应用密码，并保护配置和日志。客户端通过配置的 HTTPS PNG 地址读取生成结果，使用 FBInk 显示；服务端调度和客户端刷新是两套独立调度，不要把这里的 cron/systemd 模板安装到 Kindle。不要将私人日程分享链接写进公开仓库。
 
 ## 离线测试与语法检查
 
@@ -204,9 +247,7 @@ git diff --check
 
 覆盖正常请求、严格日期/数值/单位校验、超限响应、网络/HTTP/写入失败、旧缓存精确保留、临时文件清理、缺失或不可读缓存、午夜跨日、凭据与端点检查、路径冲突、上传禁用/未变化、阶段失败优先级及退出码。CI 的 `unittest` 自动发现新测试（Python 3.11/3.12/3.13），语法检查同时覆盖两个入口及两个测试文件。测试验证编排接口和数据解析，不验证真实 CalDAV/WebDAV/Open-Meteo 可用性、服务器 PUT 原子性、真实字体视觉效果、调度器或 Kindle 刷屏。
 
-## Kindle 设备端
-
-设备端源码与部署说明见 [`kindle/`](kindle/README.md)。服务器端生成和上传图片；设备端负责下载、FBInk 显示、半小时调度及休眠恢复，两侧配置独立。不要提交私人日程分享链接。
+客户端隔离测试运行 `python -m unittest -v test_kindle test_kindle_locks`：手势、配置及打包用例需要 POSIX `sh`，真实锁并发用例另外需要 Linux `/proc` 和 `flock`，在 Windows 会明确跳过。它们不运行完整设备脚本、不访问 USB；测试方法与验证边界见 [Kindle 设备端](kindle/README.md#本机开发检查)。
 
 ## 隐私与安全
 

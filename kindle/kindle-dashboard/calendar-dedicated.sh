@@ -14,6 +14,7 @@ child_start=
 critical=0
 launching=0
 pending_signal=0
+cleaning=0
 ROLE=${1-}
 CHILD_FILE=$RUN/child
 if [ "${1-}" = --touch ]; then CHILD_FILE=$RUN/touch-child; fi
@@ -68,6 +69,13 @@ signal_exit() {
 honor_signal() {
     launching=0
     [ "$pending_signal" = 0 ] || signal_exit "$pending_signal"
+}
+request_stop() {
+    [ "${cleaning:-0}" = 0 ] || return 0
+    # The live controller writes its own marker while holding FD 9. A --stop
+    # launcher must not write through a runtime-directory replacement race.
+    : > "$RUN/stop-requested" || exit 14
+    signal_exit 143
 }
 
 cancel_child() {
@@ -177,17 +185,12 @@ stop_touch() {
     fi
 }
 restore() {
-    if ! mkdir "$RUN/restoring" 2>/dev/null; then
-        if read -r rest_pid rest_start < "$RUN/restoring/owner" &&
-            alive "$rest_pid" "$rest_start"; then
-            log 'RECOVERY_BUSY: another live restorer owns recovery.'
-            return 1
-        fi
-        rm -f "$RUN/restoring/owner" && rmdir "$RUN/restoring" &&
-            mkdir "$RUN/restoring" || return 1
+    # Independent OFDs also serialize controller and guard, which share FD 9.
+    # A killed worker's surviving fbink/curl must finish before UI restoration.
+    if ! calendar_lock_resource; then
+        log 'RECOVERY_BUSY: resource still held or lock unverifiable; state retained, retry recovery after commands finish.'
+        return 1
     fi
-    identity "$$" || return 1
-    printf '%s %s\n' "$$" "$proc_start" > "$RUN/restoring/owner" || return 1
     restore_failed=0
     if [ -f "$RUN/ui-owned" ]; then
         if job_state lab126_gui; then
@@ -246,15 +249,14 @@ restore() {
             restore_failed=1
         fi
     fi
-    rm -f "$RUN/restoring/owner" || restore_failed=1
-    rmdir "$RUN/restoring" || restore_failed=1
+    exec 8>&-
     if [ "$restore_failed" = 0 ]; then rm -f "$RUN/output.$$" || return 1; fi
     [ "$restore_failed" = 0 ]
 }
 cleanup() {
-    final=$?
+    final=$? cleaning=1
+    trap '' HUP INT TERM USR1
     trap - 0
-    trap '' HUP INT TERM
     : > "$RUN/stopping"
     if [ -f "$RUN/stop-requested" ]; then log 'EXIT_REQUESTED: long press or explicit stop; restoring reading interface.'; fi
     stop_touch
@@ -264,9 +266,12 @@ cleanup() {
     exit "$final"
 }
 preflight() {
+    # FD 9 prevents new independent workers after this resource availability
+    # check. Close FD 8 before spawning the guardian (an independent restorer).
+    calendar_lock_resource || return "$?"
+    exec 8>&-
     for other in /tmp/calendar-legacy-auto /tmp/calendar-sleep-wake-test \
-        /tmp/calendar-network-diagnostic.lock /tmp/calendar-legacy-trial.lock \
-        /tmp/calendar-auto-refresh.lock; do
+        /tmp/calendar-network-diagnostic.lock /tmp/calendar-legacy-trial.lock; do
         [ ! -e "$other" ] || { record "BLOCKED: another calendar task exists: $other"; return 11; }
     done
     if [ -r /tmp/calendar-dedicated-trial/owner ] &&
@@ -355,8 +360,10 @@ next_slot() {
 }
 gesture_finish() {
     pressed=0
+    source=
     rm -f "$RUN/gesture-held" || exit 14
     if [ "$multiple" = 1 ]; then
+        multiple=0
         record 'GESTURE_IGNORED: use one finger.'
         return
     fi
@@ -379,9 +386,20 @@ gesture_finish() {
 }
 gesture_event() {
     [ "$#" = 8 ] || exit 16
+    for word do
+        case "$word" in ''|*[!0-9]*|0[0-9]*) exit 16 ;; esac
+        [ "${#word}" -le 5 ] && [ "$word" -le 65535 ] || exit 16
+    done
     event_sec=$(($1 + $2 * 65536))
     event_usec=$(($3 + $4 * 65536))
     [ "$event_usec" -lt 1000000 ] || exit 16
+    if [ -n "${last_sec-}" ] && { [ "$event_sec" -lt "$last_sec" ] ||
+        { [ "$event_sec" = "$last_sec" ] && [ "$event_usec" -lt "$last_usec" ]; }; }; then
+        # Suppress the entire contact epoch, not just the final release.
+        [ "$pressed" = 0 ] || multiple=1
+    fi
+    last_sec=$event_sec
+    last_usec=$event_usec
     if [ "$5" = 0 ] && [ "$6" = 3 ]; then
         record 'TOUCH_INPUT_DROPPED: contact state unreliable; restoring UI through guard.'
         exit 16
@@ -390,23 +408,39 @@ gesture_event() {
         current_slot=$7
     elif [ "$5" = 3 ] && [ "$6" = 57 ]; then
         mt_seen=1
+        remaining=
+        previous=
+        for contact in ${contacts-}; do
+            if [ "${contact%%:*}" = "$current_slot" ]; then
+                previous=${contact#*:}
+            else
+                remaining="$remaining $contact"
+            fi
+        done
         if [ "$8" -lt 32768 ]; then
+            tracking_id=$7.$8
+            if [ "$previous" = "$tracking_id" ]; then return; fi
+            for contact in $remaining; do
+                [ "${contact#*:}" != "$tracking_id" ] || {
+                    record 'TOUCH_INPUT_INVALID: duplicate tracking identity; restoring UI.'
+                    exit 16
+                }
+            done
             if [ "$pressed" = 0 ]; then
                 pressed=1
                 multiple=0
-                tracked_slot=$current_slot
                 down_sec=$event_sec
                 down_usec=$event_usec
                 : > "$RUN/gesture-held" || exit 14
-            elif [ "$source" = mt ] && [ "$current_slot" != "$tracked_slot" ]; then
+            elif [ -n "$remaining" ] || [ -n "$previous" ]; then
+                # Latch until ALL slots release, including replacement contacts.
                 multiple=1
-            elif [ "$source" = button ]; then
-                tracked_slot=$current_slot
             fi
+            contacts="$remaining $current_slot:$tracking_id"
             source=mt
-        elif [ "$7" = 65535 ] && [ "$8" = 65535 ] && [ "$pressed" = 1 ] &&
-            [ "$source" = mt ] && [ "$current_slot" = "$tracked_slot" ]; then
-            gesture_finish
+        elif [ "$7" = 65535 ] && [ "$8" = 65535 ]; then
+            contacts=$remaining
+            if [ -n "$previous" ] && [ -z "$contacts" ]; then gesture_finish; fi
         fi
     elif [ "$5" = 1 ] && [ "$6" = 330 ] && [ "$8" = 0 ]; then
         # BTN_TOUCH and MT tracking often describe the same press.
@@ -462,6 +496,16 @@ done
 [ "$(id -u)" = 0 ] && [ -d "$DIR" ] && [ ! -L "$DIR" ] && [ ! -L "$RUN" ] &&
     [ ! -L "$LOG" ] || { printf 'Unsafe path or root unavailable.\n' >&2; exit 10; }
 
+LOCK_LIB_DIR=$DIR
+case "$0" in /tmp/calendar-dedicated/controller.sh) LOCK_LIB_DIR=$RUN ;; esac
+[ -f "$LOCK_LIB_DIR/calendar-lock.sh" ] && [ ! -L "$LOCK_LIB_DIR/calendar-lock.sh" ] ||
+    { printf 'LOCK_DEPENDENCY: calendar-lock.sh is missing or unsafe.\n' >&2; exit 10; }
+. "$LOCK_LIB_DIR/calendar-lock.sh"
+calendar_lock_require || exit "$?"
+case "${1-}" in
+    --run|--guard|--touch) calendar_lock_inherited || exit "$?" ;;
+esac
+
 # Recovery and the guardian must remain usable even if private config is lost.
 case "${1-}" in
     --start|--run)
@@ -476,6 +520,8 @@ esac
 
 case "${1-}" in
     --start)
+        calendar_lock_legacy || exit "$?"
+        calendar_lock_lifecycle || exit "$?"
         if [ -d "$RUN" ]; then
             if [ -r "$RUN/owner" ] && read -r pid start < "$RUN/owner" && alive "$pid" "$start"; then
                 printf 'Dedicated dashboard already running.\n' >&2
@@ -489,7 +535,7 @@ case "${1-}" in
             # Only this controller's fixed runtime files are removed.
             for file in controller.sh refresh.sh owner guard guard-ready restored old-light old-sleep console.log child \
                 deadline touch touch-child touch-ready touch-required touch-event touch.err stop-requested stopping \
-                gesture-held manual-refresh touch-decoded calendar-config.sh config.local.conf; do
+                gesture-held manual-refresh touch-decoded calendar-config.sh config.local.conf calendar-lock.sh; do
                 rm -f "$RUN/$file" || exit 14
             done
             # Per-process command captures are retained in the existing runtime directory.
@@ -500,13 +546,31 @@ case "${1-}" in
         cp "$self" "$RUN/controller.sh" &&
             cp "$DIR/calendar-auto-refresh.sh" "$RUN/refresh.sh" &&
             cp "$DIR/calendar-config.sh" "$RUN/calendar-config.sh" &&
+            cp "$DIR/calendar-lock.sh" "$RUN/calendar-lock.sh" &&
             cp "$DIR/config.local.conf" "$RUN/config.local.conf" || exit 14
         calendar_load_config "$RUN/config.local.conf" || exit 10
+        # FD 9 crosses nohup/setsid/exec and remains held by the controller,
+        # guardian and their descendants, including every publication gap.
         nohup setsid /bin/sh "$RUN/controller.sh" --run </dev/null > "$RUN/console.log" 2>&1 &
         printf 'Dedicated calendar requested: wake with power, tap to refresh; hold one finger for two seconds then release to exit.\n'
         exit 0
         ;;
     --stop|--recover)
+        if calendar_lock_lifecycle; then
+            :
+        else
+            lock_rc=$?
+            [ "$lock_rc" = 32 ] || exit "$lock_rc"
+            if [ -r "$RUN/owner" ] && read -r pid start < "$RUN/owner" &&
+                alive "$pid" "$start" &&
+                calendar_lock_has_lifecycle_fd "$pid" && alive "$pid" "$start"; then
+                kill -USR1 "$pid" || exit 12
+                printf 'Requested dashboard exit; the lock-owning controller will write the stop marker.\n'
+                exit 0
+            fi
+            printf 'Startup, guardian or an inherited command is still active; wait and retry. No recovery files changed.\n' >&2
+            exit 11
+        fi
         [ -d "$RUN" ] || { printf 'No dedicated dashboard state exists.\n'; exit 0; }
         if read -r pid start < "$RUN/owner" && alive "$pid" "$start"; then
             : > "$RUN/stop-requested" || exit 14
@@ -531,7 +595,8 @@ case "${1-}" in
         exec 3</dev/input/event1 || exit 16
         pressed=0
         current_slot=0
-        tracked_slot=0
+        contacts=
+        last_sec=
         mt_seen=0
         source=
         multiple=0
@@ -607,12 +672,13 @@ esac
 
 identity "$$" || exit 12
 owner_start=$proc_start
-printf '%s %s\n' "$$" "$owner_start" > "$RUN/owner" || exit 14
-lease 180 || exit 14
 trap cleanup 0
 trap '' HUP
 trap 'signal_exit 130' INT
 trap 'signal_exit 143' TERM
+trap request_stop USR1
+lease 180 || exit 14
+printf '%s %s\n' "$$" "$owner_start" > "$RUN/owner" || exit 14
 record 'START: dedicated schedule 06:30-22:00 UTC+8 every half hour; real kernel sleep between slots; no boot hooks.'
 sleep 3
 preflight || exit "$?"

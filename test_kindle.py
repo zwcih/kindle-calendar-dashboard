@@ -51,7 +51,8 @@ class KindleShellTests(unittest.TestCase):
         )
 
     def test_shell_syntax_and_encoding(self):
-        for path in (ROOT / "kindle").rglob("*.sh"):
+        scripts = [*(ROOT / "kindle").rglob("*.sh"), *(ROOT / "tests").glob("kindle-*.sh")]
+        for path in scripts:
             with self.subTest(path=path.name):
                 data = path.read_bytes()
                 self.assertTrue(data.startswith(b"#!/bin/sh\n"))
@@ -181,6 +182,29 @@ class KindleShellTests(unittest.TestCase):
             result = self.shell(source + edit + "dedicated_owner_alive\n")
             self.assertEqual(result.returncode == 0, not edit)
 
+    def test_stop_request_preserves_marker_and_deferred_signal(self):
+        source = "\n".join(
+            function(CONTROLLER, name)
+            for name in ("signal_exit", "honor_signal", "request_stop")
+        )
+        for critical, launching, pending, expected in (
+            (0, 1, 0, 143), (1, 0, 0, 0), (1, 1, 143, 143),
+        ):
+            with self.subTest(critical=critical, launching=launching, pending=pending):
+                result = self.shell(
+                    source + "\nRUN=.\nROLE=--run\n"
+                    + f"critical={critical}\nlaunching={launching}\npending_signal={pending}\n"
+                    + "request_stop\n"
+                    + '[ -f "$RUN/stop-requested" ] || exit 91\n'
+                    + f'[ "$pending_signal" = {expected} ] || exit 92\n'
+                    + "printf 'retained\\n'\ncritical=0\n"
+                    + ("honor_signal\n" if expected else "signal_exit 143\n")
+                    + "exit 93\n"
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "retained\n")
+                (self.work / "stop-requested").unlink()
+
     @staticmethod
     def event(seconds, microseconds, kind, code, value):
         value &= 0xFFFFFFFF
@@ -194,11 +218,20 @@ class KindleShellTests(unittest.TestCase):
                            for name in ("gesture_finish", "gesture_event", "gesture_window"))
         return self.shell(
             source + "\nRUN=.\npressed=0\ncurrent_slot=0\ntracked_slot=0\n"
-            + "mt_seen=0\nsource=\nmultiple=0\n"
+            + "mt_seen=0\nsource=\nmultiple=0\ncontacts=\nlast_sec=\n"
             + "record() { :; }\nalive() { return 1; }\nrun() { :; }\n"
             + "touch_owner=999999\ntouch_owner_start=1\n"
             + "".join(self.event(*event) for event in events) + extra
         )
+
+    def test_multicontact_epochs_and_boundaries(self):
+        functions = "\n".join(
+            function(CONTROLLER, name)
+            for name in ("gesture_finish", "gesture_event", "gesture_window")
+        )
+        fixture = (ROOT / "tests" / "kindle-gestures.sh").read_text()
+        result = self.shell(functions + "\n" + fixture)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_touch_short_release_coalesces_and_deduplicates(self):
         sec = 1760000000
@@ -238,7 +271,7 @@ class KindleShellTests(unittest.TestCase):
     def test_start_packages_config_and_helper_without_launching_device_code(self):
         directory = self.work / "installed"
         directory.mkdir()
-        for name in ("calendar-auto-refresh.sh", "calendar-config.sh"):
+        for name in ("calendar-auto-refresh.sh", "calendar-config.sh", "calendar-lock.sh"):
             shutil.copyfile(DEVICE / name, directory / name)
         (directory / "config.local.conf").write_text(
             f"IMAGE_URL={URL}\nWIFI_SSID=fixture network\n", encoding="utf-8"
@@ -251,11 +284,15 @@ class KindleShellTests(unittest.TestCase):
             + "readlink() { printf '%s\\n' ./self.sh; }\n"
             + "nohup() { printf '%s\\n' \"$*\" > launch.txt; }\n"
             + "alive() { return 1; }\n"
+            # Packaging only: kernel acquisition is exercised in test_kindle_locks.
+            + "calendar_lock_legacy() { return 0; }\n"
+            + "calendar_lock_lifecycle() { return 0; }\n"
             + "case --start in\n--start)\n" + start + "esac\n"
         )
         result = self.shell(source)
         self.assertEqual(result.returncode, 0, result.stderr)
-        for name in ("controller.sh", "refresh.sh", "calendar-config.sh", "config.local.conf"):
+        for name in ("controller.sh", "refresh.sh", "calendar-config.sh",
+                     "calendar-lock.sh", "config.local.conf"):
             self.assertTrue((self.work / "runtime" / name).is_file(), name)
         runtime = shlex.quote((self.work / "runtime").as_posix())
         result = self.shell(

@@ -10,7 +10,6 @@ set -f
 DIR=/mnt/us/kindle-dashboard
 IMAGE=$DIR/dashboard.png
 LOG=$DIR/auto-refresh.log
-LOCK=/tmp/calendar-auto-refresh.lock
 TRIAL=/tmp/calendar-dedicated-trial
 dedicated_trial=0
 manual_refresh=0
@@ -24,9 +23,12 @@ esac
     { printf 'CONFIG_ERROR: calendar-config.sh is missing or unsafe.\n' >&2; exit 10; }
 . "$CONFIG_DIR/calendar-config.sh"
 calendar_load_config "$CONFIG_DIR/config.local.conf" || exit 10
+[ -f "$CONFIG_DIR/calendar-lock.sh" ] && [ ! -L "$CONFIG_DIR/calendar-lock.sh" ] ||
+    { printf 'LOCK_DEPENDENCY: calendar-lock.sh is missing or unsafe.\n' >&2; exit 10; }
+. "$CONFIG_DIR/calendar-lock.sh"
+calendar_lock_require || exit "$?"
 URL=$IMAGE_URL
 WORK=
-lock_owned=0
 child_pid=
 child_start=
 launch_guard=0
@@ -393,10 +395,9 @@ cleanup() {
             case "$final_status" in 129|130|143|20) ;; *) final_status=14 ;; esac
         fi
     fi
-    if [ "$lock_owned" = 1 ] && ! rmdir "$LOCK"; then
-        report "CLEANUP_FAILED: owned lock $LOCK"
-        case "$final_status" in 129|130|143|20) ;; *) final_status=14 ;; esac
-    fi
+    # Close only our references. An orphan command must retain exclusion.
+    exec 8>&-
+    exec 9>&-
     exit "$final_status"
 }
 
@@ -424,7 +425,7 @@ case "$#" in
         ;;
     *) report 'DEPENDENCY/USAGE: expected --manual, --dedicated or --dedicated-manual (legacy: no arguments, --dedicated-trial).'; exit 10 ;;
 esac
-for tool in awk cat curl date ifconfig lipc-get-prop lipc-set-prop mkdir mktemp mv od \
+for tool in awk cat curl date ifconfig lipc-get-prop lipc-set-prop mkdir mktemp mv od readlink \
     rm rmdir sha256sum sleep tail tr wc; do
     command -v "$tool" >/dev/null 2>&1 ||
         { report "DEPENDENCY_MISSING: $tool"; exit 10; }
@@ -437,15 +438,15 @@ for target in "$IMAGE" "$LOG"; do
     [ ! -e "$target" ] || [ -f "$target" ] ||
         { report "IO_FAILED: not a regular file: $target"; exit 14; }
 done
-[ ! -L "$LOCK" ] || { report 'CANCEL: lock is a symlink; not touched.'; exit 32; }
 launch_guard=1
-if mkdir "$LOCK" 2>/dev/null; then
-    lock_owned=1
+calendar_lock_legacy || exit "$?"
+if [ "$dedicated_trial" = 1 ] && [ "$TRIAL" = /tmp/calendar-dedicated ]; then
+    dedicated_owner_alive && calendar_lock_inherited ||
+        { report 'CANCEL: dedicated worker must be a direct authorized child with an inherited lifecycle lock.'; exit 32; }
 else
-    honor_signal
-    report 'CANCEL: lock unavailable; another worker or a stale lock may exist.'
-    exit 32
+    calendar_lock_lifecycle || exit "$?"
 fi
+calendar_lock_resource || exit "$?"
 honor_signal
 launch_guard=1
 WORK=$(mktemp -d "$DIR/.calendar-auto-refresh.XXXXXX") ||

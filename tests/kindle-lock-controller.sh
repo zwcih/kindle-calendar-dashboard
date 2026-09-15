@@ -30,8 +30,13 @@ cp() {
         barrier before-copy
     fi
     command cp "$@" || return "$?"
-    if [ "${PHASE:-}" = after-copy ] && [ "$2" = "$RUN/config.local.conf" ]; then
-        barrier after-copy
+    if [ "${PHASE:-}" = after-copy ]; then
+        if [ "$2" = "$RUN/config.local.conf" ]; then
+            calendar_load_config "$RUN/config.local.conf" || return "$?"
+            [ "$IMAGE_MODE" = dynamic ] || barrier after-copy
+        elif [ "$2" = "$RUN/image-auth.local.conf" ]; then
+            barrier after-copy
+        fi
     fi
 }
 printf() {

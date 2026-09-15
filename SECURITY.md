@@ -35,6 +35,8 @@ Automated checks detect selected token formats, credential literals, private end
 
 Publish only reviewed Git-tracked files or a clean checkout/archive. `.gitignore` does not protect arbitrary directory copies, manual zip/tar packages or existing history. Do not bundle local output or backups.
 
+The Kindle dynamic image mode uses a separate ignored `image-auth.local.conf` data file. Never put its Bearer in shell arguments, environment variables, examples, logs or PRs. USB/FAT storage cannot enforce POSIX private-file permissions: protect physical access and backups, use a narrowly scoped credential, and rotate it when exposed. Runtime snapshots live in a private `/tmp` directory; per-request curl configuration is created under `umask 077` on `/tmp`, not FAT. Normal cancellation removes it after terminating the exact curl child; SIGKILL or power loss can leave private artifacts. Do not collect runtime directories for public diagnostics. Dynamic requests retain TLS verification and never follow redirects with authentication.
+
 ## Reporting a vulnerability
 
 Do not post credentials, private schedules or exploitable details in a public issue. Use the repository's Security tab → Report a vulnerability if private reporting is enabled. If unavailable, open a public issue containing only a request for a private reporting channel; wait for a maintainer-provided private channel before sending details. This file does not enable GitHub private reporting automatically.

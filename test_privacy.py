@@ -9,12 +9,16 @@ class PrivacyTests(unittest.TestCase):
 
     def test_private_paths(self):
         for path in ('.local/task.py', 'output/image.png', 'config.local.json', '.env',
-                     'calendar.ics', 'key.pem', 'backups/a.txt', 'kindle/config.conf'):
+                     'calendar.ics', 'key.pem', 'backups/a.txt', 'kindle/config.conf',
+                     'kindle/image-auth.local.conf', 'kindle/image-auth.conf',
+                     'kindle/request.conf', 'calendar-image-auth.fixture/file',
+                     '.calendar-auto-refresh.fixture/file'):
             with self.subTest(path=path):
                 self.assertTrue(self.check('', path))
 
     def test_example_paths(self):
-        for path in ('config.example.json', '.env.example', 'kindle/config.example.conf'):
+        for path in ('config.example.json', '.env.example', 'kindle/config.example.conf',
+                     'kindle/image-auth.example.conf', 'kindle/config.schema.json'):
             self.assertFalse(self.check('', path))
 
     def test_token_signatures(self):

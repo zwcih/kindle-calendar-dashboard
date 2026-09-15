@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Kindle literal KEY=value configuration",
+  "description": "Reference for parsed config.local.conf keys, not a JSON input file. calendar-config.sh performs runtime validation. Dynamic mode additionally requires image-auth.local.conf containing exactly one BEARER_TOKEN=value line (RFC 6750 b64token, max file size 4096 bytes).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["IMAGE_URL", "WIFI_SSID"],
+  "properties": {
+    "IMAGE_URL": {
+      "type": "string",
+      "pattern": "^https://",
+      "description": "HTTPS endpoint without whitespace, control characters, backslash or authority credentials. Dynamic mode also forbids double quotes and fragments."
+    },
+    "WIFI_SSID": {
+      "type": "string",
+      "description": "Saved network name, 1..32 UTF-8 bytes, no control characters."
+    },
+    "IMAGE_MODE": {
+      "enum": ["static", "dynamic"],
+      "default": "static"
+    }
+  }
+}

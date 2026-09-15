@@ -32,6 +32,10 @@ def forbidden_path(path):
     if any(x in {'.local', 'output', '__pycache__', 'backups', 'cache', 'runtime'} for x in p.parts):
         return True
     n = p.name.lower()
+    if any(x.startswith(('.calendar-auto-refresh.', 'calendar-image-auth.')) for x in p.parts):
+        return True
+    if n == 'request.conf' or (n.startswith('image-auth') and n != 'image-auth.example.conf'):
+        return True
     if n.startswith('.env') and n != '.env.example':
         return True
     if n == 'config.local.json' or '.local.' in n or n in {'wifi-ssid.conf', 'github-pat', 'id_rsa', 'id_ed25519'}:
